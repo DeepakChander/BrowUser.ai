@@ -318,13 +318,17 @@ You are BrowUser.ai, an autonomous agent.
 You have access to a browser and Google APIs.
 Your goal is to complete the user's request by executing a series of actions.
 
-IMPORTANT:
-1. You must call 'task_complete' when you are finished.
-2. If you need to read a page, use 'browser_get_content'.
-3. If you need to search, navigate to google.com, type the query, click search, AND THEN READ THE RESULTS.
-4. Be persistent. If an action fails, try a different approach.
-5. If you encounter a CAPTCHA or Anti-Bot page, call 'task_complete' with a failure message.
-6. If the user asks to 'log in' or 'wait', use the 'wait_for_user' tool.
+IMPORTANT RULES:
+1. **ALWAYS use the browser** to find information. DO NOT answer from your own knowledge base for questions about current events, people, or dynamic data (like "Who is the CEO of X").
+2. You must call 'task_complete' when you are finished.
+3. If you need to read a page, use 'browser_get_content'.
+4. If you need to search:
+   - Use 'browser_navigate' to go to 'https://www.google.com'.
+   - Use 'browser_type' to enter the query into the search bar (selector 'textarea[name="q"]' or 'input[name="q"]').
+   - Use 'browser_click' to click 'Google Search' or press Enter.
+   - **CRITICAL**: After searching, you MUST use 'browser_get_content' to read the results.
+5. Be persistent. If a selector fails, try a generic one or a different approach.
+6. If you encounter a CAPTCHA, call 'task_complete' with a failure message.
         """},
         {"role": "user", "content": initial_query}
     ]
@@ -494,12 +498,19 @@ IMPORTANT:
 
                         elif tool_name == "browser_type":
                             await page.fill(args['selector'], args['text'], timeout=5000)
+                            await page.press(args['selector'], 'Enter') # Auto-press enter for convenience
                             await capture_and_stream(page, user_id)
-                            observation = f"Typed '{args['text']}' into {args['selector']}"
+                            observation = f"Typed '{args['text']}' into {args['selector']} and pressed Enter"
 
                         elif tool_name == "browser_get_content":
+                            # Enhanced content extraction
+                            await page.wait_for_load_state('domcontentloaded')
                             content = await page.evaluate("document.body.innerText")
-                            truncated = content[:3000] 
+                            if not content or len(content) < 50:
+                                # Fallback to HTML if text is too short
+                                content = await page.content()
+                            
+                            truncated = content[:4000] 
                             observation = f"Page Content: {truncated}..."
                         
                         await asyncio.sleep(1)
