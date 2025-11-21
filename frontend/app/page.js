@@ -1,5 +1,5 @@
-import ProductionLandingPage from './components/ProductionLandingPage';
+import AppRouter from './components/AppRouter';
 
 export default function Home() {
-    return <ProductionLandingPage />;
+    return <AppRouter />;
 }

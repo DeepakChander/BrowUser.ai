@@ -9,6 +9,9 @@ dotenv.config({ path: './.env' });
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Middleware to parse JSON bodies
+app.use(express.json());
+
 // Supabase Client (using Service Role Key for server-side security)
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -19,21 +22,85 @@ const supabase = createClient(
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_CALLBACK_URL // http://localhost:5000/auth/google/callback
+  process.env.GOOGLE_CALLBACK_URL
 );
 
 // Define the scopes needed for your agent
 const SCOPES = [
   'https://www.googleapis.com/auth/userinfo.email',
   'https://www.googleapis.com/auth/userinfo.profile',
-  'https://www.googleapis.com/auth/gmail.send', // Agent can send emails
-  'https://www.googleapis.com/auth/drive'       // Agent can access Docs/Sheets
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/drive'
 ];
+
+// --- 🔒 Encryption Placeholders ---
+// In a production environment, use 'crypto' module with AES-256-GCM
+function encryptToken(token) {
+  // TODO: Implement robust encryption
+  return token;
+}
+
+function decryptToken(encryptedToken) {
+  // TODO: Implement robust decryption
+  return encryptedToken;
+}
+
+// --- 🔄 Token Refresh Utility ---
+async function getValidAccessToken(userId) {
+  try {
+    // 1. Fetch the encrypted refresh token from Supabase
+    const { data: tokenData, error: dbError } = await supabase
+      .from('oauth_tokens')
+      .select('refresh_token')
+      .eq('user_id', userId)
+      .single();
+
+    if (dbError || !tokenData) {
+      throw new Error('User token not found');
+    }
+
+    // 2. Decrypt the refresh token
+    const refreshToken = decryptToken(tokenData.refresh_token);
+
+    // 3. Set credentials on the OAuth client
+    oauth2Client.setCredentials({
+      refresh_token: refreshToken
+    });
+
+    // 4. Request a new Access Token
+    // getAccessToken() automatically refreshes if needed using the refresh_token
+    const { token: newAccessToken, res: tokenResponse } = await oauth2Client.getAccessToken();
+
+    if (!newAccessToken) {
+      throw new Error('Failed to refresh access token');
+    }
+
+    // 5. Update Supabase with new token details if they changed (optional but good practice)
+    // Note: getAccessToken might not always return a new refresh_token, but it returns expiry
+    if (tokenResponse && tokenResponse.data && tokenResponse.data.expiry_date) {
+      await supabase
+        .from('oauth_tokens')
+        .update({
+          // access_token: newAccessToken, // Uncomment if you decide to store access_token
+          expires_at: new Date(tokenResponse.data.expiry_date).toISOString()
+        })
+        .eq('user_id', userId);
+    }
+
+    return newAccessToken;
+
+  } catch (error) {
+    console.error('Token Refresh Error:', error.message);
+    throw error;
+  }
+}
+
+// --- Routes ---
 
 // 1. Initiates the Google login process
 app.get('/auth/google', (req, res) => {
   const authorizationUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline', // THIS IS CRITICAL TO GET THE REFRESH TOKEN
+    access_type: 'offline', // CRITICAL: Ensures we get a refresh token
     scope: SCOPES,
     include_granted_scopes: true,
     prompt: 'consent' // Forces consent screen to ensure refresh token is returned
@@ -46,55 +113,61 @@ app.get('/auth/google/callback', async (req, res) => {
   const { code } = req.query;
 
   try {
-    // Exchange the authorization code for tokens
     const { tokens } = await oauth2Client.getToken(code);
-    oauth2Client.setCredentials(tokens); // Set credentials on the client for user info lookup
+    oauth2Client.setCredentials(tokens);
 
-    // Fetch user profile information
     const userinfo = google.oauth2({ version: 'v2', auth: oauth2Client });
     const profile = await userinfo.userinfo.get();
 
-    // --- 🔑 Secure Storage Logic ---
-
-    // 1. Store/Update User in Users Table
-    // Note: Using lowercase table names to match standard SQL creation
+    // 1. Store/Update User
     const { data: userData, error: userError } = await supabase
       .from('users')
       .upsert({
         google_id: profile.data.id,
         email: profile.data.email,
         display_name: profile.data.name,
-      }, { onConflict: 'google_id' }) // Update if Google ID exists
+      }, { onConflict: 'google_id' })
       .select('id')
       .single();
 
     if (userError) throw userError;
     const user_id = userData.id;
 
-    // 2. Store the Refresh Token in the OAuthTokens Table
+    // 2. Store Refresh Token
     if (tokens.refresh_token) {
-      // NOTE: In a production environment, tokens.refresh_token MUST be encrypted
       const { error: tokenError } = await supabase
         .from('oauth_tokens')
         .upsert({
           user_id: user_id,
           service: 'google',
-          // Assuming you implement encryption: encrypt(tokens.refresh_token)
-          refresh_token: tokens.refresh_token,
-          // access_token: tokens.access_token, // Removed as it was not in the initial schema
+          refresh_token: encryptToken(tokens.refresh_token),
           expires_at: new Date(tokens.expiry_date).toISOString(),
-        }, { onConflict: 'user_id' }); // Only one Google token per user
+        }, { onConflict: 'user_id' });
 
       if (tokenError) throw tokenError;
     }
 
-    // Redirect to the frontend success page (e.g., the chat UI)
-    res.redirect('http://localhost:3000/chat?status=success');
+    res.redirect('http://localhost:3000/?status=success');
 
   } catch (error) {
     console.error('OAuth Error:', error);
-    // Redirect to frontend error page
-    res.redirect('http://localhost:3000/login?status=error');
+    res.redirect('http://localhost:3000/?status=error');
+  }
+});
+
+// 3. API Endpoint to get a fresh token (Protected)
+app.get('/api/token/refresh', async (req, res) => {
+  const { userId } = req.query; // In production, extract this from a session/JWT
+
+  if (!userId) {
+    return res.status(400).json({ error: 'Missing userId' });
+  }
+
+  try {
+    const accessToken = await getValidAccessToken(userId);
+    res.json({ accessToken });
+  } catch (error) {
+    res.status(401).json({ error: 'Unauthorized: Could not refresh token' });
   }
 });
 
