@@ -22,6 +22,28 @@ export default function Home() {
         }
     }, []);
 
+    // Handle OAuth callback
+    useEffect(() => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const status = urlParams.get('status');
+        const uid = urlParams.get('uid');
+
+        if (status === 'success' && uid) {
+            // Store user ID
+            localStorage.setItem('browuser_uid', uid);
+            setIsAuthenticated(true);
+
+            // Redirect to dashboard
+            setActiveRoute('dashboard');
+
+            // Clean URL
+            window.history.replaceState({}, document.title, '/');
+        } else if (status === 'error') {
+            alert('Authentication failed. Please try again.');
+            window.history.replaceState({}, document.title, '/');
+        }
+    }, []);
+
     // Handle logout
     const handleLogout = () => {
         localStorage.removeItem('browuser_uid');
