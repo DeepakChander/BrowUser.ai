@@ -15,6 +15,7 @@
         "three": "^0.160.0",
         "@react-three/fiber": "^8.15.12",
         "@react-three/drei": "^9.96.1",
+        "framer-motion": "^10.16.16",
         "lucide-react": "^0.300.0"
     },
     "devDependencies": {
