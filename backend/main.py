@@ -204,6 +204,20 @@ tools = [
     {
         "type": "function",
         "function": {
+            "name": "wait_for_user",
+            "description": "Pauses execution for a specified number of seconds to allow the user to manually interact with the browser (e.g., to log in).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "seconds": {"type": "integer", "description": "Number of seconds to wait."}
+                },
+                "required": ["seconds"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "task_complete",
             "description": "Call this tool when the user's request has been fully satisfied.",
             "parameters": {
@@ -236,6 +250,7 @@ async def execute_react_loop(user_id: str, initial_query: str, access_token: str
     Executes the continuous ReAct loop: Think -> Act -> Observe -> Repeat
     """
     browser = None
+    context = None
     page = None
     
     # Conversation History
@@ -251,64 +266,63 @@ IMPORTANT:
 3. If you need to search, navigate to google.com, type the query, click search, AND THEN READ THE RESULTS.
 4. Be persistent. If an action fails, try a different approach.
 5. If you encounter a CAPTCHA or Anti-Bot page, call 'task_complete' with a failure message.
+6. If the user asks to 'log in' or 'wait', use the 'wait_for_user' tool.
         """},
         {"role": "user", "content": initial_query}
     ]
 
     try:
-        print("[ReAct] Starting Loop with Stealth Mode...")
+        print("[ReAct] Starting Loop...")
         
-        # --- 🕵️ Stealth Configuration ---
-        user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0"
-        ]
-        selected_ua = random.choice(user_agents)
-
         playwright = await async_playwright().start()
         
-        # Launch with arguments to hide automation flags
-        browser = await playwright.chromium.launch(
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-infobars",
-                "--start-maximized"
+        # --- 🕵️ Browser Launch Strategy ---
+        # Strategy A: Try to use the User's Real Chrome Profile (Best for Cookies/Auth)
+        # Strategy B: Fallback to a Fresh Profile (Stealth Mode)
+        
+        user_data_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Google", "Chrome", "User Data")
+        using_real_profile = False
+
+        try:
+            print(f"[ReAct] Attempting to launch Real Chrome Profile from: {user_data_dir}")
+            context = await playwright.chromium.launch_persistent_context(
+                user_data_dir,
+                channel="chrome",
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                viewport={"width": 1920, "height": 1080}
+            )
+            using_real_profile = True
+            print("[ReAct] ✅ Successfully attached to Real Chrome Profile!")
+            await manager.send_payload(user_id, {"type": "status", "data": "✅ Using your Real Chrome Profile"})
+            
+        except Exception as e:
+            print(f"[ReAct] ⚠️ Could not use Real Profile (Chrome likely open). Falling back to Stealth Mode. Error: {e}")
+            await manager.send_payload(user_id, {"type": "status", "data": "⚠️ Chrome is open. Using Temporary Profile (Login required)."})
+            
+            # Fallback: Launch fresh browser
+            user_agents = [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             ]
-        )
-        
-        # Create context with specific viewport and user agent
-        context = await browser.new_context(
-            user_agent=selected_ua,
-            viewport={"width": 1920, "height": 1080},
-            locale="en-US",
-            timezone_id="America/New_York",
-            permissions=["geolocation"],
-            geolocation={"latitude": 40.7128, "longitude": -74.0060},
-            java_script_enabled=True
-        )
-        
-        # Inject script to remove navigator.webdriver property
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-        """)
+            browser = await playwright.chromium.launch(
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-infobars", "--start-maximized"]
+            )
+            context = await browser.new_context(
+                user_agent=random.choice(user_agents),
+                viewport={"width": 1920, "height": 1080},
+                java_script_enabled=True
+            )
+            # Inject stealth script
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-        # --- 🍪 Session Injection (The Golden Key) ---
-        # We use a persistent storage file for cookies
-        auth_file = f"auth_state_{user_id}.json"
-        
-        if os.path.exists(auth_file):
-            print(f"[Session] Loading saved session from {auth_file}")
-            # Load cookies into the context
-            await context.add_cookies(json.load(open(auth_file)))
+        # Get the page
+        if context.pages:
+            page = context.pages[0]
         else:
-            print("[Session] No saved session found. Starting fresh.")
-
-        page = await context.new_page()
+            page = await context.new_page()
+            
         await capture_and_stream(page, user_id)
 
         loop_count = 0
@@ -347,16 +361,18 @@ IMPORTANT:
                             final_answer = args['final_answer']
                             await manager.send_payload(user_id, {"type": "status", "data": "✅ Task Completed"})
                             
-                            # Save cookies on successful completion if we logged in
-                            cookies = await context.cookies()
-                            with open(auth_file, 'w') as f:
-                                json.dump(cookies, f)
-                                print(f"[Session] Saved session to {auth_file}")
-
-                            if browser:
-                                await browser.close()
-                                await playwright.stop()
+                            # Cleanup
+                            if context: await context.close()
+                            if browser: await browser.close()
+                            await playwright.stop()
                             return final_answer
+
+                        elif tool_name == "wait_for_user":
+                            seconds = args.get('seconds', 30)
+                            for i in range(seconds):
+                                if i % 5 == 0: await capture_and_stream(page, user_id)
+                                await asyncio.sleep(1)
+                            observation = f"Waited for {seconds} seconds."
 
                         elif tool_name == "send_gmail":
                             message = MIMEText(args['body'])
@@ -436,16 +452,18 @@ IMPORTANT:
                 print("[ReAct] LLM replied without tool.")
                 return response_message.content
 
-        if browser:
-            await browser.close()
-            await playwright.stop()
+        if context: await context.close()
+        if browser: await browser.close()
+        await playwright.stop()
         return "❌ Task timed out (max steps reached)."
 
     except Exception as e:
         print(f"[ReAct] Critical Error: {e}")
-        if browser:
-            await browser.close()
+        try:
+            if context: await context.close()
+            if browser: await browser.close()
             await playwright.stop()
+        except: pass
         return f"❌ Critical Error: {str(e)}"
 
 
