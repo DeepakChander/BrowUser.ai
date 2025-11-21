@@ -128,39 +128,35 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# --- 🛠️ Tool Definitions ---
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "send_gmail",
-            "description": "Sends an email using the user's Gmail account.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "recipient": {"type": "string"},
-                    "subject": {"type": "string"},
-                    "body": {"type": "string"}
-                },
-                "required": ["recipient", "subject", "body"]
-            }
+# --- 🛠️ Tool Configuration & Modular System ---
+
+EXTERNAL_TOOLS_CONFIG = {
+    "send_gmail": {
+        "description": "Sends an email using the user's Gmail account.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "recipient": {"type": "string"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"}
+            },
+            "required": ["recipient", "subject", "body"]
         }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "create_google_doc",
-            "description": "Creates a new Google Document in the user's Drive.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "content": {"type": "string"}
-                },
-                "required": ["title", "content"]
-            }
+    "create_google_doc": {
+        "description": "Creates a new Google Document in the user's Drive.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "content": {"type": "string"}
+            },
+            "required": ["title", "content"]
         }
-    },
+    }
+}
+
+CORE_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -248,6 +244,39 @@ tools = [
         }
     }
 ]
+
+def generate_tool_definitions():
+    """
+    Dynamically generates the full list of tools for OpenAI by combining
+    CORE_TOOLS and EXTERNAL_TOOLS_CONFIG.
+    """
+    generated_tools = list(CORE_TOOLS)
+    
+    for tool_name, config in EXTERNAL_TOOLS_CONFIG.items():
+        generated_tools.append({
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "description": config["description"],
+                "parameters": config["parameters"]
+            }
+        })
+        
+    return generated_tools
+
+# Initialize Tools
+tools = generate_tool_definitions()
+
+# --- ⚖️ Compliance & Status ---
+
+@app.get("/api/compliance/status")
+def get_compliance_status():
+    return {
+        "version": "v1.0.0",
+        "privacy_policy": "https://example.com/privacy",
+        "terms_of_service": "https://example.com/terms",
+        "connected_tools": list(EXTERNAL_TOOLS_CONFIG.keys())
+    }
 
 # --- ⚡ Execution Engine with ReAct Loop & Stealth Mode ---
 

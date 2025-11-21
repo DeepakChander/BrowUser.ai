@@ -17,6 +17,7 @@ export default function ChatInterface() {
     const [suggestions, setSuggestions] = useState([]);
     const [logs, setLogs] = useState([]);
     const [showLogs, setShowLogs] = useState(false);
+    const [complianceInfo, setComplianceInfo] = useState(null);
 
     const messagesEndRef = useRef(null);
     const wsRef = useRef(null);
@@ -27,7 +28,7 @@ export default function ChatInterface() {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
-    // Fetch Saved Automations & Suggestions
+    // Fetch Saved Automations, Suggestions & Compliance Info
     useEffect(() => {
         const userId = localStorage.getItem('browuser_uid');
         if (userId) {
@@ -51,6 +52,13 @@ export default function ChatInterface() {
                 })
                 .catch(err => console.error("Failed to load suggestions", err));
         }
+
+        // Load Compliance Info (No Auth Required)
+        fetch('http://localhost:5000/api/compliance/status')
+            .then(res => res.json())
+            .then(data => setComplianceInfo(data))
+            .catch(err => console.error("Failed to load compliance info", err));
+
     }, []);
 
     // --- 🔌 WebSocket Connection Logic ---
@@ -235,6 +243,22 @@ export default function ChatInterface() {
 
                 <div className="flex-1 overflow-y-auto p-4 space-y-6">
 
+                    {/* Connected Tools Section */}
+                    {complianceInfo && complianceInfo.connected_tools && (
+                        <div className="space-y-2">
+                            <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-2">
+                                <Activity size={12} /> Connected Tools
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                                {complianceInfo.connected_tools.map((tool, idx) => (
+                                    <span key={idx} className="px-2 py-1 bg-green-50 text-green-700 text-xs font-bold rounded border border-green-100">
+                                        {tool}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
                     {/* Suggestions Section */}
                     {suggestions.length > 0 && (
                         <div className="space-y-2">
@@ -303,6 +327,19 @@ export default function ChatInterface() {
                         <LogOut size={16} />
                         <span>Sign Out</span>
                     </button>
+                    {/* Compliance Footer */}
+                    {complianceInfo && (
+                        <div className="mt-4 pt-4 border-t border-gray-100 text-[10px] text-gray-400 flex flex-col gap-1">
+                            <div className="flex justify-between">
+                                <span>Version: {complianceInfo.version}</span>
+                            </div>
+                            <div className="flex gap-2">
+                                <a href={complianceInfo.privacy_policy} target="_blank" className="hover:text-gray-600">Privacy</a>
+                                <span>•</span>
+                                <a href={complianceInfo.terms_of_service} target="_blank" className="hover:text-gray-600">Terms</a>
+                            </div>
+                        </div>
+                    )}
                 </div>
             </div>
 
