@@ -34,9 +34,8 @@ const SCOPES = [
 ];
 
 // --- 🔒 Encryption Placeholders ---
-// In a production environment, use 'crypto' module with AES-256-GCM
 function encryptToken(token) {
-  // TODO: Implement robust encryption
+  // TODO: Implement robust encryption (e.g., AES-256)
   return token;
 }
 
@@ -68,20 +67,17 @@ async function getValidAccessToken(userId) {
     });
 
     // 4. Request a new Access Token
-    // getAccessToken() automatically refreshes if needed using the refresh_token
     const { token: newAccessToken, res: tokenResponse } = await oauth2Client.getAccessToken();
 
     if (!newAccessToken) {
       throw new Error('Failed to refresh access token');
     }
 
-    // 5. Update Supabase with new token details if they changed (optional but good practice)
-    // Note: getAccessToken might not always return a new refresh_token, but it returns expiry
+    // 5. Update Supabase with new token details if they changed
     if (tokenResponse && tokenResponse.data && tokenResponse.data.expiry_date) {
       await supabase
         .from('oauth_tokens')
         .update({
-          // access_token: newAccessToken, // Uncomment if you decide to store access_token
           expires_at: new Date(tokenResponse.data.expiry_date).toISOString()
         })
         .eq('user_id', userId);
@@ -93,6 +89,16 @@ async function getValidAccessToken(userId) {
     console.error('Token Refresh Error:', error.message);
     throw error;
   }
+}
+
+// --- 🤖 Agent Executor Placeholder ---
+async function agentExecutor(accessToken, query) {
+  // This is where the Gemini API integration will go.
+  // For now, we just confirm we have the tools ready.
+  console.log(`[Agent] Received Query: "${query}"`);
+  console.log(`[Agent] Using Access Token: ${accessToken.substring(0, 10)}...`);
+
+  return `I received your request: "${query}". I have a valid Google Access Token and I am ready to execute this task. (Gemini Integration Coming Soon)`;
 }
 
 // --- Routes ---
@@ -147,7 +153,8 @@ app.get('/auth/google/callback', async (req, res) => {
       if (tokenError) throw tokenError;
     }
 
-    res.redirect('http://localhost:3000/?status=success');
+    // Redirect with userId (TEMPORARY FOR DEMO - In production use Session/Cookie)
+    res.redirect(`http://localhost:3000/?status=success&uid=${user_id}`);
 
   } catch (error) {
     console.error('OAuth Error:', error);
@@ -157,7 +164,7 @@ app.get('/auth/google/callback', async (req, res) => {
 
 // 3. API Endpoint to get a fresh token (Protected)
 app.get('/api/token/refresh', async (req, res) => {
-  const { userId } = req.query; // In production, extract this from a session/JWT
+  const { userId } = req.query;
 
   if (!userId) {
     return res.status(400).json({ error: 'Missing userId' });
@@ -168,6 +175,29 @@ app.get('/api/token/refresh', async (req, res) => {
     res.json({ accessToken });
   } catch (error) {
     res.status(401).json({ error: 'Unauthorized: Could not refresh token' });
+  }
+});
+
+// 4. Chat Query Endpoint
+app.post('/api/chat/query', async (req, res) => {
+  const { query, userId } = req.body;
+
+  if (!userId || !query) {
+    return res.status(400).json({ error: 'Missing userId or query' });
+  }
+
+  try {
+    // 1. Get a fresh access token
+    const accessToken = await getValidAccessToken(userId);
+
+    // 2. Execute the agent logic
+    const response = await agentExecutor(accessToken, query);
+
+    res.json({ response });
+
+  } catch (error) {
+    console.error('Chat Processing Error:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
   }
 });
 

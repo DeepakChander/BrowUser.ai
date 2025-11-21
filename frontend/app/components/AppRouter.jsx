@@ -12,20 +12,29 @@ export default function AppRouter() {
         // Check URL query parameters on mount
         const params = new URLSearchParams(window.location.search);
         const status = params.get('status');
+        const uid = params.get('uid');
 
         if (status === 'success') {
+            // Store UID in localStorage for the demo session
+            if (uid) localStorage.setItem('browuser_uid', uid);
+
             setView('chat');
             // Optional: Clean URL without reload
             window.history.replaceState({}, document.title, "/");
         } else if (status === 'error') {
             setView('error');
         } else {
-            setView('login');
+            // Check if we have a stored session
+            if (localStorage.getItem('browuser_uid')) {
+                setView('chat');
+            } else {
+                setView('login');
+            }
         }
     }, []);
 
     if (view === 'loading') {
-        return null; // Or a loading spinner
+        return null;
     }
 
     if (view === 'chat') {
