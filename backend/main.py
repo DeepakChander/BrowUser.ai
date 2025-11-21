@@ -234,6 +234,10 @@ async def execute_action_plan(action_plan: list, access_token: str, user_id: str
             browser = await playwright.chromium.launch(headless=False) 
             context = await browser.new_context()
             page = await context.new_page()
+            
+            # TODO: In a future step, we could load cookies here to inject session
+            # await context.add_cookies(cookies)
+            
             await capture_and_stream(page, user_id)
 
         for i, action in enumerate(action_plan):

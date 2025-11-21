@@ -79,9 +79,23 @@ export default function ChatInterface() {
         };
     }, []);
 
+    const ensureSessionExists = () => {
+        // Placeholder for session validation logic
+        // In a real app, this would check cookies or ping an auth endpoint
+        const userId = localStorage.getItem('browuser_uid');
+        if (!userId) {
+            console.warn("No session found, redirecting...");
+            window.location.href = '/';
+            return false;
+        }
+        return true;
+    };
+
     const handleSend = async (e) => {
         e.preventDefault();
         if (!input.trim()) return;
+
+        if (!ensureSessionExists()) return;
 
         const userMessage = { role: 'user', content: input };
         setMessages(prev => [...prev, userMessage]);
@@ -93,11 +107,6 @@ export default function ChatInterface() {
 
         try {
             const userId = localStorage.getItem('browuser_uid');
-
-            if (!userId) {
-                window.location.href = '/';
-                return;
-            }
 
             const response = await fetch('http://localhost:5000/api/chat/query', {
                 method: 'POST',
