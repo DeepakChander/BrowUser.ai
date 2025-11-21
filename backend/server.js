@@ -2,6 +2,7 @@ const express = require('express');
 const dotenv = require('dotenv');
 const { google } = require('googleapis');
 const { createClient } = require('@supabase/supabase-js');
+const OpenAI = require('openai');
 
 // Load environment variables from .env file
 dotenv.config({ path: './.env' });
@@ -17,6 +18,11 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
+
+// OpenAI Client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // Google OAuth Configuration
 const oauth2Client = new google.auth.OAuth2(
@@ -68,15 +74,53 @@ async function getValidAccessToken(userId) {
   }
 }
 
-// --- 🤖 Agent Executor (Gemini Placeholder) ---
+// --- 🤖 Agent Executor (OpenAI Integration) ---
 async function agentExecutor(accessToken, query) {
-  // Placeholder for Gemini API integration
   console.log(`[Agent] Executing with Token: ${accessToken.substring(0, 10)}...`);
 
-  return {
-    message: `Agent received valid token. Preparing to execute task: "${query}"`,
-    accessToken: `${accessToken.substring(0, 15)}...[truncated]`
-  };
+  try {
+    // We give the AI context about what it can do
+    const systemPrompt = `
+You are BrowUser.ai, an intelligent automation agent.
+You have access to a user's Google account via an Access Token.
+Current Access Token: ${accessToken} (Do not output this token to the user, just use it internally if needed).
+
+Your capabilities:
+1. Read/Send Emails (Gmail)
+2. Manage Files (Drive)
+3. General Assistance
+
+The user has asked: "${query}"
+
+For now, you cannot ACTUALLY execute the API calls (that logic is coming in Phase 2).
+Your goal right now is to:
+1. Acknowledge the user's request.
+2. Explain technically how you WOULD execute it using the Google API.
+3. Confirm that you have the valid credentials to do so.
+
+Keep your response concise and professional.
+        `;
+
+    const completion = await openai.chat.completions.create({
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: query }
+      ],
+      model: "gpt-3.5-turbo", // Or gpt-4 if you have access
+    });
+
+    return {
+      message: completion.choices[0].message.content,
+      accessToken: `${accessToken.substring(0, 15)}...[truncated]`
+    };
+
+  } catch (error) {
+    console.error("OpenAI Error:", error);
+    return {
+      message: "I connected to the agent brain, but encountered an error processing your request with OpenAI.",
+      error: error.message
+    };
+  }
 }
 
 // --- Routes ---
@@ -145,7 +189,7 @@ app.get('/api/token/refresh', async (req, res) => {
   }
 });
 
-// --- New Chat Route ---
+// --- Chat Route ---
 app.post('/api/chat/query', async (req, res) => {
   const { query, userId } = req.body;
 
@@ -154,8 +198,7 @@ app.post('/api/chat/query', async (req, res) => {
   }
 
   try {
-    // 1. Credential Check (Server-side validation)
-    // Even if client sent a token, we verify/refresh it here to be safe
+    // 1. Credential Check
     const validAccessToken = await getValidAccessToken(userId);
 
     // 2. Execute Agent
