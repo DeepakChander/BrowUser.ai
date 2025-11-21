@@ -1,7 +1,5 @@
+import ProductionLandingPage from './components/ProductionLandingPage';
+
 export default function Home() {
-    return (
-        <main>
-            <h1>Welcome to BrowUser.ai Frontend</h1>
-        </main>
-    );
+    return <ProductionLandingPage />;
 }
