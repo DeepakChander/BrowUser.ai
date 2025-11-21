@@ -199,10 +199,27 @@ tools = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_complete",
+            "description": "Call this tool when the user's request has been fully satisfied.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "final_answer": {
+                        "type": "string",
+                        "description": "A summary of what was done or the answer to the user's question."
+                    }
+                },
+                "required": ["final_answer"]
+            }
+        }
     }
 ]
 
-# --- ⚡ Execution Engine with Self-Correction ---
+# --- ⚡ Execution Engine with ReAct Loop ---
 
 async def capture_and_stream(page, user_id: str):
     """Captures screenshot and streams to frontend via WebSocket"""
@@ -213,202 +230,173 @@ async def capture_and_stream(page, user_id: str):
     except Exception as e:
         print(f"[Stream] Capture Error: {e}")
 
-async def execute_action_plan(action_plan: list, access_token: str, user_id: str, original_query: str = "", retry_count: int = 0):
+async def execute_react_loop(user_id: str, initial_query: str, access_token: str):
     """
-    Executes actions with self-correction logic.
+    Executes the continuous ReAct loop: Think -> Act -> Observe -> Repeat
     """
-    results = []
     browser = None
     page = None
+    
+    # Conversation History
+    messages = [
+        {"role": "system", "content": """
+You are BrowUser.ai, an autonomous agent.
+You have access to a browser and Google APIs.
+Your goal is to complete the user's request by executing a series of actions.
 
-    # Prevent infinite recursion
-    if retry_count > 1:
-        return ["❌ Maximum self-correction attempts reached."]
+IMPORTANT:
+1. You must call 'task_complete' when you are finished.
+2. If you need to read a page, use 'browser_get_content'.
+3. If you need to search, navigate to google.com, type the query, click search, AND THEN READ THE RESULTS.
+4. Be persistent. If an action fails, try a different approach.
+        """},
+        {"role": "user", "content": initial_query}
+    ]
 
     try:
-        needs_browser = any(action['name'].startswith('browser_') for action in action_plan)
+        print("[ReAct] Starting Loop...")
         
-        if needs_browser:
-            print("[Executor] Launching Browser...")
-            playwright = await async_playwright().start()
-            browser = await playwright.chromium.launch(headless=False) 
-            context = await browser.new_context()
-            page = await context.new_page()
-            
-            # TODO: In a future step, we could load cookies here to inject session
-            # await context.add_cookies(cookies)
-            
-            await capture_and_stream(page, user_id)
+        # Launch Browser upfront (we almost always need it)
+        playwright = await async_playwright().start()
+        browser = await playwright.chromium.launch(headless=False)
+        context = await browser.new_context()
+        page = await context.new_page()
+        await capture_and_stream(page, user_id)
 
-        for i, action in enumerate(action_plan):
-            tool_name = action['name']
-            args = action['arguments']
-            print(f"[Executor] Running: {tool_name} with {args}")
-            
-            # Send status update
-            await manager.send_payload(user_id, {"type": "status", "data": f"Running: {tool_name}..."})
+        loop_count = 0
+        max_loops = 15 # Safety limit
 
-            try:
-                if tool_name == "send_gmail":
-                    message = MIMEText(args['body'])
-                    message['to'] = args['recipient']
-                    message['subject'] = args['subject']
-                    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        while loop_count < max_loops:
+            loop_count += 1
+            print(f"[ReAct] Step {loop_count}")
+            
+            # 1. THINK (Call LLM)
+            completion = openai.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                tools=tools,
+                tool_choice="auto"
+            )
+            
+            response_message = completion.choices[0].message
+            messages.append(response_message) # Add agent's thought to history
+
+            # 2. ACT (Check for tool calls)
+            if response_message.tool_calls:
+                for tool_call in response_message.tool_calls:
+                    tool_name = tool_call.function.name
+                    args = json.loads(tool_call.function.arguments)
+                    call_id = tool_call.id
                     
-                    res = requests.post(
-                        'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
-                        headers={'Authorization': f'Bearer {access_token}'},
-                        json={'raw': raw_message}
-                    )
-                    if res.status_code == 200:
-                        results.append(f"✅ Email sent to {args['recipient']}")
-                    else:
-                        raise Exception(f"Gmail API Error: {res.text}")
+                    print(f"[ReAct] Action: {tool_name} args: {args}")
+                    await manager.send_payload(user_id, {"type": "status", "data": f"Step {loop_count}: {tool_name}..."})
 
-                elif tool_name == "create_google_doc":
-                    res = requests.post(
-                        'https://docs.googleapis.com/v1/documents',
-                        headers={'Authorization': f'Bearer {access_token}'},
-                        json={'title': args['title']}
-                    )
-                    if res.status_code == 200:
-                        doc_id = res.json().get('documentId')
-                        requests.post(
-                            f'https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate',
-                            headers={'Authorization': f'Bearer {access_token}'},
-                            json={
-                                "requests": [
-                                    {
-                                        "insertText": {
-                                            "text": args['content'],
-                                            "endOfSegmentLocation": {"segmentId": ""}
-                                        }
+                    observation = ""
+                    
+                    # 3. OBSERVE (Execute Tool)
+                    try:
+                        if tool_name == "task_complete":
+                            final_answer = args['final_answer']
+                            await manager.send_payload(user_id, {"type": "status", "data": "✅ Task Completed"})
+                            if browser:
+                                await browser.close()
+                                await playwright.stop()
+                            return final_answer
+
+                        elif tool_name == "send_gmail":
+                            message = MIMEText(args['body'])
+                            message['to'] = args['recipient']
+                            message['subject'] = args['subject']
+                            raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+                            res = requests.post(
+                                'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+                                headers={'Authorization': f'Bearer {access_token}'},
+                                json={'raw': raw_message}
+                            )
+                            if res.status_code == 200:
+                                observation = f"Email sent successfully to {args['recipient']}"
+                            else:
+                                observation = f"Failed to send email: {res.text}"
+
+                        elif tool_name == "create_google_doc":
+                            res = requests.post(
+                                'https://docs.googleapis.com/v1/documents',
+                                headers={'Authorization': f'Bearer {access_token}'},
+                                json={'title': args['title']}
+                            )
+                            if res.status_code == 200:
+                                doc_id = res.json().get('documentId')
+                                requests.post(
+                                    f'https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate',
+                                    headers={'Authorization': f'Bearer {access_token}'},
+                                    json={
+                                        "requests": [
+                                            {
+                                                "insertText": {
+                                                    "text": args['content'],
+                                                    "endOfSegmentLocation": {"segmentId": ""}
+                                                }
+                                            }
+                                        ]
                                     }
-                                ]
-                            }
-                        )
-                        results.append(f"✅ Created Google Doc: {args['title']}")
-                    else:
-                        raise Exception(f"Docs API Error: {res.text}")
+                                )
+                                observation = f"Created Google Doc '{args['title']}' with ID: {doc_id}"
+                            else:
+                                observation = f"Failed to create doc: {res.text}"
 
-                elif tool_name == "browser_navigate":
-                    if page:
-                        await page.goto(args['url'])
-                        await capture_and_stream(page, user_id)
-                        results.append(f"✅ Navigated to {args['url']}")
+                        elif tool_name == "browser_navigate":
+                            await page.goto(args['url'])
+                            await capture_and_stream(page, user_id)
+                            observation = f"Navigated to {args['url']}"
 
-                elif tool_name == "browser_click":
-                    if page:
-                        await page.click(args['selector'], timeout=5000) # 5s timeout for fail-fast
-                        await capture_and_stream(page, user_id)
-                        results.append(f"✅ Clicked {args['selector']}")
+                        elif tool_name == "browser_click":
+                            await page.click(args['selector'], timeout=5000)
+                            await capture_and_stream(page, user_id)
+                            observation = f"Clicked element {args['selector']}"
 
-                elif tool_name == "browser_type":
-                    if page:
-                        await page.fill(args['selector'], args['text'], timeout=5000)
-                        await capture_and_stream(page, user_id)
-                        results.append(f"✅ Typed into {args['selector']}")
+                        elif tool_name == "browser_type":
+                            await page.fill(args['selector'], args['text'], timeout=5000)
+                            await capture_and_stream(page, user_id)
+                            observation = f"Typed '{args['text']}' into {args['selector']}"
 
-                elif tool_name == "browser_get_content":
-                    if page:
-                        content = await page.evaluate("document.body.innerText")
-                        truncated = content[:2000] + "..." if len(content) > 2000 else content
-                        results.append(f"📄 Page Content Read ({len(content)} chars)")
-                        # We don't stream content to user, just internal use usually, but good for debug
+                        elif tool_name == "browser_get_content":
+                            content = await page.evaluate("document.body.innerText")
+                            truncated = content[:3000] # Limit context window usage
+                            observation = f"Page Content: {truncated}..."
+                        
+                        # Small delay for visual feedback
+                        await asyncio.sleep(1)
 
-                await asyncio.sleep(0.5)
+                    except Exception as e:
+                        observation = f"Error executing {tool_name}: {str(e)}"
+                        print(f"[ReAct] Error: {observation}")
 
-            except Exception as step_error:
-                print(f"[Executor] Error in step {tool_name}: {step_error}")
-                
-                # --- 🧠 Self-Correction Logic ---
-                if page and original_query:
-                    await manager.send_payload(user_id, {"type": "status", "data": "⚠️ Error detected. Recalibrating..."})
-                    
-                    # 1. Get Context
-                    page_content = await page.evaluate("document.body.innerText")
-                    page_content_short = page_content[:3000]
-                    
-                    # 2. Ask LLM for Fix
-                    fix_prompt = f"""
-                    The user requested: "{original_query}".
-                    The step '{tool_name}' failed with error: {str(step_error)}.
-                    
-                    Current Page Text Content:
-                    {page_content_short}
-                    
-                    Analyze the page content and the error.
-                    Generate a NEW, REVISED JSON Action Plan to accomplish the user's goal from this point forward.
-                    If the selector was wrong, find a better one from the context or suggest a different approach.
-                    """
-                    
-                    print("[Executor] Triggering Self-Correction...")
-                    new_plan = await agent_planner(access_token, fix_prompt)
-                    
-                    if new_plan:
-                         await manager.send_payload(user_id, {"type": "status", "data": "🧠 Plan Revised. Resuming..."})
-                         # Recursive call with incremented retry count
-                         correction_results = await execute_action_plan(new_plan, access_token, user_id, original_query, retry_count + 1)
-                         results.extend(correction_results)
-                         break # Stop the old plan, the new plan takes over
-                    else:
-                        results.append(f"❌ Could not generate a fix for: {str(step_error)}")
-                        break
-                else:
-                    results.append(f"❌ Failed: {str(step_error)}")
-                    break
+                    # 4. FEEDBACK (Add observation to history)
+                    messages.append({
+                        "tool_call_id": call_id,
+                        "role": "tool",
+                        "name": tool_name,
+                        "content": observation
+                    })
+            else:
+                # LLM didn't call a tool, maybe it's asking a question or chatting
+                # In a strict agent loop, we might force it to use tools, but here we'll just return the text
+                print("[ReAct] LLM replied without tool.")
+                return response_message.content
 
+        # Loop limit reached
         if browser:
             await browser.close()
             await playwright.stop()
-
-        return results
+        return "❌ Task timed out (max steps reached)."
 
     except Exception as e:
-        print(f"[Executor] Critical Error: {e}")
+        print(f"[ReAct] Critical Error: {e}")
         if browser:
             await browser.close()
-        return [f"❌ Critical Execution Error: {str(e)}"]
+            await playwright.stop()
+        return f"❌ Critical Error: {str(e)}"
 
-
-# --- 🤖 Agent Planner ---
-async def agent_planner(access_token: str, query: str):
-    print(f"[Agent] Planning Action for: {query}")
-    
-    try:
-        system_prompt = f"""
-You are BrowUser.ai, an intelligent automation agent.
-You have access to a user's Google account via an Access Token.
-Your goal is to decompose the user's request into a series of executable actions using the provided tools.
-Generate a structured JSON Action Plan.
-        """
-
-        completion = openai.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": query}
-            ],
-            tools=tools,
-            tool_choice="auto"
-        )
-
-        response_message = completion.choices[0].message
-
-        if response_message.tool_calls:
-            action_plan = []
-            for tool_call in response_message.tool_calls:
-                action_plan.append({
-                    "name": tool_call.function.name,
-                    "arguments": json.loads(tool_call.function.arguments)
-                })
-            return action_plan
-        else:
-            return None
-
-    except Exception as e:
-        print(f"OpenAI Error: {str(e)}")
-        return None
 
 # --- Routes ---
 
@@ -421,7 +409,6 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     await manager.connect(websocket, user_id)
     try:
         while True:
-            # Keep connection alive
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(user_id)
@@ -511,20 +498,10 @@ async def chat_query(chat_req: ChatQuery):
         # 1. Get Valid Token
         access_token = get_valid_access_token(chat_req.userId)
         
-        # 2. Plan Actions
-        action_plan = await agent_planner(access_token, chat_req.query)
+        # 2. Execute ReAct Loop
+        final_response = await execute_react_loop(chat_req.userId, chat_req.query, access_token)
         
-        response_text = ""
-        
-        if action_plan:
-            # 3. Execute Actions (passing user_id for streaming)
-            print(f"Executing Plan: {action_plan}")
-            execution_results = await execute_action_plan(action_plan, access_token, chat_req.userId, chat_req.query)
-            response_text = "Automation Completed:\n" + "\n".join(execution_results)
-        else:
-            response_text = "I understood your request, but I didn't generate any specific actions to execute."
-
-        return {"response": {"message": response_text}}
+        return {"response": {"message": final_response}}
         
     except Exception as e:
         print(f"Chat Error: {str(e)}")
@@ -533,20 +510,17 @@ async def chat_query(chat_req: ChatQuery):
 class SaveAutomationRequest(BaseModel):
     user_id: str
     name: str
-    # In a real app, we'd pass the 'action_plan' here too, but for now we'll just simulate saving the last concept
     description: str
 
 @app.post("/api/automation/save")
 async def save_automation(req: SaveAutomationRequest):
     try:
-        # Insert into Supabase
         data = {
             "user_id": req.user_id,
             "name": req.name,
             "description": req.description,
             "created_at": datetime.now().isoformat()
         }
-        # Assuming table 'saved_automations' exists
         supabase.table('saved_automations').insert(data).execute()
         return {"status": "success", "message": "Automation saved successfully"}
     except Exception as e:
