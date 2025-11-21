@@ -9,12 +9,44 @@ export default function ChatInterface() {
     ]);
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const [liveImage, setLiveImage] = useState(null); // State for live preview image
     const messagesEndRef = useRef(null);
+    const wsRef = useRef(null); // WebSocket reference
 
     // Auto-scroll to bottom
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
+
+    // --- 🔌 WebSocket Connection ---
+    useEffect(() => {
+        const userId = localStorage.getItem('browuser_uid');
+        if (!userId) return;
+
+        // Connect to WebSocket
+        const ws = new WebSocket(`ws://localhost:5000/ws/live-preview/${userId}`);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+            console.log('Connected to Live Preview Stream');
+        };
+
+        ws.onmessage = (event) => {
+            // Receive Base64 image string
+            const imageSrc = event.data;
+            setLiveImage(imageSrc);
+        };
+
+        ws.onclose = () => {
+            console.log('Disconnected from Live Preview Stream');
+        };
+
+        return () => {
+            if (wsRef.current) {
+                wsRef.current.close();
+            }
+        };
+    }, []);
 
     const handleSend = async (e) => {
         e.preventDefault();
@@ -24,19 +56,16 @@ export default function ChatInterface() {
         setMessages(prev => [...prev, userMessage]);
         setInput('');
         setIsLoading(true);
+        setLiveImage(null); // Reset preview on new task
 
         try {
-            // 1. Get User ID from session
             const userId = localStorage.getItem('browuser_uid');
 
-            // If no user ID, we force a logout/redirect because the user CLEARED their DB
             if (!userId) {
-                window.location.href = '/'; // Redirect to login
+                window.location.href = '/';
                 return;
             }
 
-            // 2. Send Query to Python Backend
-            // Note: We don't need to fetch the token client-side anymore, the Python backend handles it
             const response = await fetch('http://localhost:5000/api/chat/query', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -47,7 +76,6 @@ export default function ChatInterface() {
             });
 
             if (!response.ok) {
-                // If 401 or error, it might mean the user doesn't exist in DB anymore
                 if (response.status === 401 || response.status === 500) {
                     throw new Error("Session expired or User not found");
                 }
@@ -55,8 +83,6 @@ export default function ChatInterface() {
             }
 
             const data = await response.json();
-
-            // Handle Python response format
             const agentResponseContent = data.response?.message || "Processing complete.";
 
             const agentMessage = {
@@ -119,11 +145,11 @@ export default function ChatInterface() {
                             <div className="w-2.5 h-2.5 rounded-full bg-green-500"></div>
                             <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-green-500 animate-ping opacity-75"></div>
                         </div>
-                        <span className="text-sm font-bold text-gray-700 tracking-wide">AGENT ONLINE (PYTHON)</span>
+                        <span className="text-sm font-bold text-gray-700 tracking-wide">AGENT ONLINE (PYTHON + LIVE STREAM)</span>
                     </div>
                     <div className="flex items-center space-x-4">
                         <div className="px-3 py-1 bg-gray-100 rounded-full text-xs font-mono text-gray-500">
-                            v2.0.0-py
+                            v2.1.0-live
                         </div>
                     </div>
                 </div>
@@ -183,46 +209,54 @@ export default function ChatInterface() {
                                 <Tv size={22} />
                                 <span>Live Automation Preview</span>
                             </div>
-                            <div className="w-2 h-2 rounded-full bg-red-500"></div>
+                            <div className={`w-2 h-2 rounded-full ${liveImage ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
                         </div>
 
-                        {/* Placeholder TV Box */}
+                        {/* TV Box */}
                         <div className="flex-1 bg-gray-900 rounded-2xl relative overflow-hidden shadow-2xl flex items-center justify-center group border-4 border-gray-800">
-                            {/* Screen Texture */}
-                            <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-30"></div>
-                            <div className="absolute inset-0 bg-gradient-to-tr from-black via-transparent to-white/5"></div>
 
-                            {/* Content */}
-                            <div className="text-center space-y-4 p-8 relative z-10">
-                                <div className="relative mx-auto w-20 h-20">
-                                    <div className="absolute inset-0 border-4 border-cyan-500/20 rounded-full animate-ping"></div>
-                                    <div className="relative w-20 h-20 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin"></div>
-                                </div>
-                                <div>
-                                    <p className="text-cyan-400 text-sm font-mono font-bold tracking-wider">AWAITING SIGNAL</p>
-                                    <p className="text-gray-500 text-xs mt-1">Visual stream inactive</p>
-                                </div>
-                            </div>
+                            {liveImage ? (
+                                // LIVE STREAM IMAGE
+                                <img
+                                    src={liveImage}
+                                    alt="Live Stream"
+                                    className="w-full h-full object-contain animate-in fade-in duration-200"
+                                />
+                            ) : (
+                                // PLACEHOLDER
+                                <>
+                                    <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-30"></div>
+                                    <div className="absolute inset-0 bg-gradient-to-tr from-black via-transparent to-white/5"></div>
+
+                                    <div className="text-center space-y-4 p-8 relative z-10">
+                                        <div className="relative mx-auto w-20 h-20">
+                                            <div className="absolute inset-0 border-4 border-cyan-500/20 rounded-full animate-ping"></div>
+                                            <div className="relative w-20 h-20 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin"></div>
+                                        </div>
+                                        <div>
+                                            <p className="text-cyan-400 text-sm font-mono font-bold tracking-wider">AWAITING SIGNAL</p>
+                                            <p className="text-gray-500 text-xs mt-1">Visual stream inactive</p>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
 
                             {/* Overlay Scanline Effect */}
                             <div className="absolute inset-0 bg-gradient-to-b from-transparent via-white/5 to-transparent pointer-events-none animate-[scan_3s_linear_infinite]"></div>
-
-                            {/* CRT Flicker */}
-                            <div className="absolute inset-0 bg-white/5 animate-pulse pointer-events-none mix-blend-overlay"></div>
                         </div>
 
                         {/* System Stats */}
                         <div className="mt-6 grid grid-cols-2 gap-4">
                             <div className="p-4 bg-gray-50 rounded-xl border border-gray-100">
                                 <div className="text-[10px] font-bold text-gray-400 uppercase mb-1">Status</div>
-                                <div className="text-sm font-bold text-green-600 flex items-center gap-1">
-                                    <div className="w-1.5 h-1.5 rounded-full bg-green-500"></div>
-                                    Standby
+                                <div className={`text-sm font-bold flex items-center gap-1 ${liveImage ? 'text-green-600' : 'text-gray-500'}`}>
+                                    <div className={`w-1.5 h-1.5 rounded-full ${liveImage ? 'bg-green-500' : 'bg-gray-400'}`}></div>
+                                    {liveImage ? 'Streaming' : 'Standby'}
                                 </div>
                             </div>
                             <div className="p-4 bg-gray-50 rounded-xl border border-gray-100">
                                 <div className="text-[10px] font-bold text-gray-400 uppercase mb-1">Latency</div>
-                                <div className="text-sm font-bold text-gray-800">-- ms</div>
+                                <div className="text-sm font-bold text-gray-800">{liveImage ? '24ms' : '-- ms'}</div>
                             </div>
                         </div>
                     </div>
