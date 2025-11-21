@@ -87,7 +87,7 @@ def get_valid_access_token(user_id: str):
         print(f"Token Refresh Error: {str(e)}")
         raise HTTPException(status_code=401, detail="Could not refresh token")
 
-# --- � WebSocket Connection Manager ---
+# --- 📡 WebSocket Connection Manager ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[str, WebSocket] = {}
@@ -105,13 +105,16 @@ class ConnectionManager:
     async def send_image(self, user_id: str, base64_image: str):
         if user_id in self.active_connections:
             try:
+                # Send raw base64 string
                 await self.active_connections[user_id].send_text(base64_image)
             except Exception as e:
                 print(f"[WS] Error sending image to {user_id}: {e}")
+                # If sending fails, maybe disconnect?
+                # self.disconnect(user_id)
 
 manager = ConnectionManager()
 
-# --- �🛠️ Tool Definitions ---
+# --- 🛠️ Tool Definitions ---
 tools = [
     {
         "type": "function",
@@ -194,9 +197,12 @@ tools = [
 async def capture_and_stream(page, user_id: str):
     """Captures screenshot and streams to frontend via WebSocket"""
     try:
+        # Capture screenshot as bytes
         screenshot_bytes = await page.screenshot(type='jpeg', quality=50)
+        # Encode to base64 string
         base64_str = base64.b64encode(screenshot_bytes).decode('utf-8')
-        await manager.send_image(user_id, f"data:image/jpeg;base64,{base64_str}")
+        # Send via WebSocket manager
+        await manager.send_image(user_id, base64_str)
     except Exception as e:
         print(f"[Stream] Capture Error: {e}")
 
@@ -214,11 +220,12 @@ async def execute_action_plan(action_plan: list, access_token: str, user_id: str
         if needs_browser:
             print("[Executor] Launching Browser...")
             playwright = await async_playwright().start()
-            browser = await playwright.chromium.launch(headless=False) # Keep visible for server-side debug too
+            # IMPORTANT: headless=False ensures visual rendering for screenshots
+            browser = await playwright.chromium.launch(headless=False) 
             context = await browser.new_context()
             page = await context.new_page()
             
-            # Initial blank capture
+            # Initial blank capture to verify stream
             await capture_and_stream(page, user_id)
 
         for action in action_plan:
@@ -271,22 +278,25 @@ async def execute_action_plan(action_plan: list, access_token: str, user_id: str
             elif tool_name == "browser_navigate":
                 if page:
                     await page.goto(args['url'])
+                    # Capture immediately after navigation
                     await capture_and_stream(page, user_id)
                     results.append(f"✅ Navigated to {args['url']}")
 
             elif tool_name == "browser_click":
                 if page:
                     await page.click(args['selector'])
+                    # Capture after click
                     await capture_and_stream(page, user_id)
                     results.append(f"✅ Clicked {args['selector']}")
 
             elif tool_name == "browser_type":
                 if page:
                     await page.fill(args['selector'], args['text'])
+                    # Capture after typing
                     await capture_and_stream(page, user_id)
                     results.append(f"✅ Typed into {args['selector']}")
             
-            # Small delay to make the stream perceivable
+            # Small delay to allow UI to update and user to see the action
             await asyncio.sleep(0.5)
 
         if browser:

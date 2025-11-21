@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Terminal, Tv, LogOut, Activity } from 'lucide-react';
+import { Send, Terminal, Tv, LogOut, Activity, Wifi, WifiOff } from 'lucide-react';
 
 export default function ChatInterface() {
     const [messages, setMessages] = useState([
@@ -10,6 +10,7 @@ export default function ChatInterface() {
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [liveImage, setLiveImage] = useState(null); // State for live preview image
+    const [wsStatus, setWsStatus] = useState('disconnected'); // connected, disconnected, error
     const messagesEndRef = useRef(null);
     const wsRef = useRef(null); // WebSocket reference
 
@@ -18,28 +19,43 @@ export default function ChatInterface() {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
-    // --- 🔌 WebSocket Connection ---
+    // --- 🔌 WebSocket Connection Logic ---
     useEffect(() => {
         const userId = localStorage.getItem('browuser_uid');
         if (!userId) return;
 
-        // Connect to WebSocket
-        const ws = new WebSocket(`ws://localhost:5000/ws/live-preview/${userId}`);
-        wsRef.current = ws;
+        const connectWebSocket = () => {
+            console.log('Attempting to connect to Live Stream...');
+            const ws = new WebSocket(`ws://localhost:5000/ws/live-preview/${userId}`);
+            wsRef.current = ws;
 
-        ws.onopen = () => {
-            console.log('Connected to Live Preview Stream');
+            ws.onopen = () => {
+                console.log('✅ Connected to Live Preview Stream');
+                setWsStatus('connected');
+            };
+
+            ws.onmessage = (event) => {
+                // Receive Base64 image string
+                // The backend sends raw base64 string, we need to prepend the data URI scheme
+                const base64Data = event.data;
+                if (base64Data) {
+                    setLiveImage(`data:image/jpeg;base64,${base64Data}`);
+                }
+            };
+
+            ws.onclose = () => {
+                console.log('❌ Disconnected from Live Preview Stream');
+                setWsStatus('disconnected');
+                // Optional: Implement reconnection logic here if needed
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket Error:', error);
+                setWsStatus('error');
+            };
         };
 
-        ws.onmessage = (event) => {
-            // Receive Base64 image string
-            const imageSrc = event.data;
-            setLiveImage(imageSrc);
-        };
-
-        ws.onclose = () => {
-            console.log('Disconnected from Live Preview Stream');
-        };
+        connectWebSocket();
 
         return () => {
             if (wsRef.current) {
@@ -209,7 +225,12 @@ export default function ChatInterface() {
                                 <Tv size={22} />
                                 <span>Live Automation Preview</span>
                             </div>
-                            <div className={`w-2 h-2 rounded-full ${liveImage ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
+                            <div className={`flex items-center space-x-2 text-xs font-bold uppercase ${wsStatus === 'connected' ? 'text-green-500' :
+                                    wsStatus === 'error' ? 'text-red-500' : 'text-gray-400'
+                                }`}>
+                                {wsStatus === 'connected' ? <Wifi size={14} /> : <WifiOff size={14} />}
+                                <span>{wsStatus}</span>
+                            </div>
                         </div>
 
                         {/* TV Box */}
