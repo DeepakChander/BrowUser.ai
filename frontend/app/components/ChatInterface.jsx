@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Terminal, Tv, LogOut, Activity, Wifi, WifiOff } from 'lucide-react';
+import { Send, Terminal, Tv, LogOut, Activity, Wifi, WifiOff, Save, RefreshCw } from 'lucide-react';
 
 export default function ChatInterface() {
     const [messages, setMessages] = useState([
@@ -9,12 +9,14 @@ export default function ChatInterface() {
     ]);
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
-    const [liveImage, setLiveImage] = useState(null); // State for live preview image
-    const [wsStatus, setWsStatus] = useState('disconnected'); // connected, disconnected, error
+    const [liveImage, setLiveImage] = useState(null);
+    const [statusText, setStatusText] = useState('Standby'); // New status text state
+    const [wsStatus, setWsStatus] = useState('disconnected');
+    const [showSaveOption, setShowSaveOption] = useState(false); // To show save button
     const messagesEndRef = useRef(null);
-    const wsRef = useRef(null); // WebSocket reference
+    const wsRef = useRef(null);
 
-    // Auto-scroll to bottom
+    // Auto-scroll
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
@@ -35,18 +37,31 @@ export default function ChatInterface() {
             };
 
             ws.onmessage = (event) => {
-                // Receive Base64 image string
-                // The backend sends raw base64 string, we need to prepend the data URI scheme
-                const base64Data = event.data;
-                if (base64Data) {
-                    setLiveImage(`data:image/jpeg;base64,${base64Data}`);
+                try {
+                    const payload = JSON.parse(event.data);
+
+                    if (payload.type === 'image') {
+                        setLiveImage(`data:image/jpeg;base64,${payload.data}`);
+                    } else if (payload.type === 'status') {
+                        setStatusText(payload.data);
+                    }
+                } catch (e) {
+                    // Fallback for raw base64 (backward compatibility)
+                    if (event.data.startsWith('data:image') || event.data.length > 100) {
+                        setLiveImage(`data:image/jpeg;base64,${event.data}`);
+                    }
                 }
             };
 
             ws.onclose = () => {
                 console.log('❌ Disconnected from Live Preview Stream');
                 setWsStatus('disconnected');
-                // Optional: Implement reconnection logic here if needed
+                // Simple retry logic
+                setTimeout(() => {
+                    if (wsRef.current?.readyState === WebSocket.CLOSED) {
+                        connectWebSocket();
+                    }
+                }, 3000);
             };
 
             ws.onerror = (error) => {
@@ -72,7 +87,9 @@ export default function ChatInterface() {
         setMessages(prev => [...prev, userMessage]);
         setInput('');
         setIsLoading(true);
-        setLiveImage(null); // Reset preview on new task
+        setLiveImage(null);
+        setStatusText('Processing...');
+        setShowSaveOption(false);
 
         try {
             const userId = localStorage.getItem('browuser_uid');
@@ -107,12 +124,37 @@ export default function ChatInterface() {
             };
 
             setMessages(prev => [...prev, agentMessage]);
+            setStatusText('Completed');
+            setShowSaveOption(true); // Show save option after success
 
         } catch (error) {
             console.error('Chat Error:', error);
             setMessages(prev => [...prev, { role: 'agent', content: "Error: Session invalid or Agent unreachable. Please Sign Out and Login again." }]);
+            setStatusText('Error');
         } finally {
             setIsLoading(false);
+        }
+    };
+
+    const handleSaveAutomation = async () => {
+        const name = prompt("Enter a name for this automation:");
+        if (!name) return;
+
+        const userId = localStorage.getItem('browuser_uid');
+        try {
+            await fetch('http://localhost:5000/api/automation/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user_id: userId,
+                    name: name,
+                    description: "Saved from chat session"
+                })
+            });
+            alert("Automation Saved!");
+            setShowSaveOption(false);
+        } catch (e) {
+            alert("Failed to save.");
         }
     };
 
@@ -121,10 +163,16 @@ export default function ChatInterface() {
         window.location.href = '/';
     };
 
+    const manualReconnect = () => {
+        if (wsRef.current) wsRef.current.close();
+        // The useEffect retry logic will pick it up, or we can force reload
+        window.location.reload();
+    };
+
     return (
         <div className="flex h-screen bg-gray-50 text-black font-sans overflow-hidden">
 
-            {/* Left Sidebar (Navigation/History) */}
+            {/* Left Sidebar */}
             <div className="w-64 bg-white border-r border-gray-200 flex flex-col hidden md:flex">
                 <div className="p-6 border-b border-gray-100 flex items-center space-x-2">
                     <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center text-cyan-400">
@@ -141,17 +189,14 @@ export default function ChatInterface() {
                 </div>
 
                 <div className="p-4 border-t border-gray-100">
-                    <button
-                        onClick={handleLogout}
-                        className="flex items-center space-x-2 text-gray-500 hover:text-red-500 transition-colors text-sm font-medium w-full px-2 py-2 rounded-lg hover:bg-red-50"
-                    >
+                    <button onClick={handleLogout} className="flex items-center space-x-2 text-gray-500 hover:text-red-500 transition-colors text-sm font-medium w-full px-2 py-2 rounded-lg hover:bg-red-50">
                         <LogOut size={16} />
                         <span>Sign Out</span>
                     </button>
                 </div>
             </div>
 
-            {/* Main Content Area */}
+            {/* Main Content */}
             <div className="flex-1 flex flex-col">
 
                 {/* Header */}
@@ -161,19 +206,25 @@ export default function ChatInterface() {
                             <div className="w-2.5 h-2.5 rounded-full bg-green-500"></div>
                             <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-green-500 animate-ping opacity-75"></div>
                         </div>
-                        <span className="text-sm font-bold text-gray-700 tracking-wide">AGENT ONLINE (PYTHON + LIVE STREAM)</span>
+                        <span className="text-sm font-bold text-gray-700 tracking-wide">AGENT ONLINE (AUTONOMOUS)</span>
                     </div>
                     <div className="flex items-center space-x-4">
+                        {showSaveOption && (
+                            <button onClick={handleSaveAutomation} className="flex items-center space-x-1 px-3 py-1.5 bg-cyan-50 text-cyan-700 rounded-lg text-xs font-bold hover:bg-cyan-100 transition-colors">
+                                <Save size={14} />
+                                <span>Save Workflow</span>
+                            </button>
+                        )}
                         <div className="px-3 py-1 bg-gray-100 rounded-full text-xs font-mono text-gray-500">
-                            v2.1.0-live
+                            v3.2.0-auto
                         </div>
                     </div>
                 </div>
 
-                {/* Split View: Chat & Live Preview */}
+                {/* Split View */}
                 <div className="flex-1 flex overflow-hidden">
 
-                    {/* Chat Area (Center) */}
+                    {/* Chat Area */}
                     <div className="flex-1 flex flex-col max-w-4xl mx-auto w-full bg-gray-50/50">
                         <div className="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
                             {messages.map((msg, idx) => (
@@ -190,14 +241,14 @@ export default function ChatInterface() {
                                 <div className="flex justify-start animate-in fade-in duration-300">
                                     <div className="bg-white p-4 rounded-2xl rounded-tl-none border border-gray-200 shadow-sm flex items-center space-x-2">
                                         <Activity size={16} className="text-cyan-500 animate-spin" />
-                                        <span className="text-xs text-gray-500 font-medium">Processing...</span>
+                                        <span className="text-xs text-gray-500 font-medium">{statusText}</span>
                                     </div>
                                 </div>
                             )}
                             <div ref={messagesEndRef} />
                         </div>
 
-                        {/* Input Area */}
+                        {/* Input */}
                         <div className="p-6 bg-white border-t border-gray-200">
                             <form onSubmit={handleSend} className="relative flex items-center max-w-4xl mx-auto">
                                 <input
@@ -218,37 +269,38 @@ export default function ChatInterface() {
                         </div>
                     </div>
 
-                    {/* Live Preview Area (Right) */}
+                    {/* Live Preview Area */}
                     <div className="w-[450px] bg-white border-l border-gray-200 p-6 hidden xl:flex flex-col shadow-xl z-20">
                         <div className="flex items-center justify-between mb-6">
                             <div className="flex items-center space-x-2 text-gray-900 font-bold text-lg">
                                 <Tv size={22} />
                                 <span>Live Automation Preview</span>
                             </div>
-                            <div className={`flex items-center space-x-2 text-xs font-bold uppercase ${wsStatus === 'connected' ? 'text-green-500' :
-                                    wsStatus === 'error' ? 'text-red-500' : 'text-gray-400'
-                                }`}>
-                                {wsStatus === 'connected' ? <Wifi size={14} /> : <WifiOff size={14} />}
-                                <span>{wsStatus}</span>
+                            <div className="flex items-center space-x-3">
+                                <button onClick={manualReconnect} className="text-gray-400 hover:text-black transition-colors" title="Reconnect Signal">
+                                    <RefreshCw size={14} />
+                                </button>
+                                <div className={`flex items-center space-x-2 text-xs font-bold uppercase ${wsStatus === 'connected' ? 'text-green-500' :
+                                        wsStatus === 'error' ? 'text-red-500' : 'text-gray-400'
+                                    }`}>
+                                    {wsStatus === 'connected' ? <Wifi size={14} /> : <WifiOff size={14} />}
+                                    <span>{wsStatus}</span>
+                                </div>
                             </div>
                         </div>
 
                         {/* TV Box */}
                         <div className="flex-1 bg-gray-900 rounded-2xl relative overflow-hidden shadow-2xl flex items-center justify-center group border-4 border-gray-800">
-
                             {liveImage ? (
-                                // LIVE STREAM IMAGE
                                 <img
                                     src={liveImage}
                                     alt="Live Stream"
                                     className="w-full h-full object-contain animate-in fade-in duration-200"
                                 />
                             ) : (
-                                // PLACEHOLDER
                                 <>
                                     <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-30"></div>
                                     <div className="absolute inset-0 bg-gradient-to-tr from-black via-transparent to-white/5"></div>
-
                                     <div className="text-center space-y-4 p-8 relative z-10">
                                         <div className="relative mx-auto w-20 h-20">
                                             <div className="absolute inset-0 border-4 border-cyan-500/20 rounded-full animate-ping"></div>
@@ -261,8 +313,6 @@ export default function ChatInterface() {
                                     </div>
                                 </>
                             )}
-
-                            {/* Overlay Scanline Effect */}
                             <div className="absolute inset-0 bg-gradient-to-b from-transparent via-white/5 to-transparent pointer-events-none animate-[scan_3s_linear_infinite]"></div>
                         </div>
 
@@ -270,9 +320,9 @@ export default function ChatInterface() {
                         <div className="mt-6 grid grid-cols-2 gap-4">
                             <div className="p-4 bg-gray-50 rounded-xl border border-gray-100">
                                 <div className="text-[10px] font-bold text-gray-400 uppercase mb-1">Status</div>
-                                <div className={`text-sm font-bold flex items-center gap-1 ${liveImage ? 'text-green-600' : 'text-gray-500'}`}>
+                                <div className={`text-sm font-bold flex items-center gap-1 ${statusText === 'Error' ? 'text-red-500' : 'text-gray-800'}`}>
                                     <div className={`w-1.5 h-1.5 rounded-full ${liveImage ? 'bg-green-500' : 'bg-gray-400'}`}></div>
-                                    {liveImage ? 'Streaming' : 'Standby'}
+                                    {statusText}
                                 </div>
                             </div>
                             <div className="p-4 bg-gray-50 rounded-xl border border-gray-100">

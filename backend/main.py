@@ -6,6 +6,7 @@ import os
 import json
 import base64
 import asyncio
+import traceback
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -102,15 +103,12 @@ class ConnectionManager:
             del self.active_connections[user_id]
             print(f"[WS] User {user_id} disconnected")
 
-    async def send_image(self, user_id: str, base64_image: str):
+    async def send_payload(self, user_id: str, payload: dict):
         if user_id in self.active_connections:
             try:
-                # Send raw base64 string
-                await self.active_connections[user_id].send_text(base64_image)
+                await self.active_connections[user_id].send_json(payload)
             except Exception as e:
-                print(f"[WS] Error sending image to {user_id}: {e}")
-                # If sending fails, maybe disconnect?
-                # self.disconnect(user_id)
+                print(f"[WS] Error sending payload to {user_id}: {e}")
 
 manager = ConnectionManager()
 
@@ -189,30 +187,43 @@ tools = [
                 "required": ["selector", "text"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_get_content",
+            "description": "Extracts the text content from the current web page. Use this to read search results or page info.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
     }
 ]
 
-# --- ⚡ Execution Engine with Live Preview ---
+# --- ⚡ Execution Engine with Self-Correction ---
 
 async def capture_and_stream(page, user_id: str):
     """Captures screenshot and streams to frontend via WebSocket"""
     try:
-        # Capture screenshot as bytes
         screenshot_bytes = await page.screenshot(type='jpeg', quality=50)
-        # Encode to base64 string
         base64_str = base64.b64encode(screenshot_bytes).decode('utf-8')
-        # Send via WebSocket manager
-        await manager.send_image(user_id, base64_str)
+        await manager.send_payload(user_id, {"type": "image", "data": base64_str})
     except Exception as e:
         print(f"[Stream] Capture Error: {e}")
 
-async def execute_action_plan(action_plan: list, access_token: str, user_id: str):
+async def execute_action_plan(action_plan: list, access_token: str, user_id: str, original_query: str = "", retry_count: int = 0):
     """
-    Executes actions and streams visual updates.
+    Executes actions with self-correction logic.
     """
     results = []
     browser = None
     page = None
+
+    # Prevent infinite recursion
+    if retry_count > 1:
+        return ["❌ Maximum self-correction attempts reached."]
 
     try:
         needs_browser = any(action['name'].startswith('browser_') for action in action_plan)
@@ -220,84 +231,128 @@ async def execute_action_plan(action_plan: list, access_token: str, user_id: str
         if needs_browser:
             print("[Executor] Launching Browser...")
             playwright = await async_playwright().start()
-            # IMPORTANT: headless=False ensures visual rendering for screenshots
             browser = await playwright.chromium.launch(headless=False) 
             context = await browser.new_context()
             page = await context.new_page()
-            
-            # Initial blank capture to verify stream
             await capture_and_stream(page, user_id)
 
-        for action in action_plan:
+        for i, action in enumerate(action_plan):
             tool_name = action['name']
             args = action['arguments']
             print(f"[Executor] Running: {tool_name} with {args}")
-
-            if tool_name == "send_gmail":
-                message = MIMEText(args['body'])
-                message['to'] = args['recipient']
-                message['subject'] = args['subject']
-                raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
-                
-                res = requests.post(
-                    'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
-                    headers={'Authorization': f'Bearer {access_token}'},
-                    json={'raw': raw_message}
-                )
-                if res.status_code == 200:
-                    results.append(f"✅ Email sent to {args['recipient']}")
-                else:
-                    results.append(f"❌ Failed to send email: {res.text}")
-
-            elif tool_name == "create_google_doc":
-                res = requests.post(
-                    'https://docs.googleapis.com/v1/documents',
-                    headers={'Authorization': f'Bearer {access_token}'},
-                    json={'title': args['title']}
-                )
-                if res.status_code == 200:
-                    doc_id = res.json().get('documentId')
-                    requests.post(
-                        f'https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate',
-                        headers={'Authorization': f'Bearer {access_token}'},
-                        json={
-                            "requests": [
-                                {
-                                    "insertText": {
-                                        "text": args['content'],
-                                        "endOfSegmentLocation": {"segmentId": ""}
-                                    }
-                                }
-                            ]
-                        }
-                    )
-                    results.append(f"✅ Created Google Doc: {args['title']}")
-                else:
-                    results.append(f"❌ Failed to create doc: {res.text}")
-
-            elif tool_name == "browser_navigate":
-                if page:
-                    await page.goto(args['url'])
-                    # Capture immediately after navigation
-                    await capture_and_stream(page, user_id)
-                    results.append(f"✅ Navigated to {args['url']}")
-
-            elif tool_name == "browser_click":
-                if page:
-                    await page.click(args['selector'])
-                    # Capture after click
-                    await capture_and_stream(page, user_id)
-                    results.append(f"✅ Clicked {args['selector']}")
-
-            elif tool_name == "browser_type":
-                if page:
-                    await page.fill(args['selector'], args['text'])
-                    # Capture after typing
-                    await capture_and_stream(page, user_id)
-                    results.append(f"✅ Typed into {args['selector']}")
             
-            # Small delay to allow UI to update and user to see the action
-            await asyncio.sleep(0.5)
+            # Send status update
+            await manager.send_payload(user_id, {"type": "status", "data": f"Running: {tool_name}..."})
+
+            try:
+                if tool_name == "send_gmail":
+                    message = MIMEText(args['body'])
+                    message['to'] = args['recipient']
+                    message['subject'] = args['subject']
+                    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+                    
+                    res = requests.post(
+                        'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+                        headers={'Authorization': f'Bearer {access_token}'},
+                        json={'raw': raw_message}
+                    )
+                    if res.status_code == 200:
+                        results.append(f"✅ Email sent to {args['recipient']}")
+                    else:
+                        raise Exception(f"Gmail API Error: {res.text}")
+
+                elif tool_name == "create_google_doc":
+                    res = requests.post(
+                        'https://docs.googleapis.com/v1/documents',
+                        headers={'Authorization': f'Bearer {access_token}'},
+                        json={'title': args['title']}
+                    )
+                    if res.status_code == 200:
+                        doc_id = res.json().get('documentId')
+                        requests.post(
+                            f'https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate',
+                            headers={'Authorization': f'Bearer {access_token}'},
+                            json={
+                                "requests": [
+                                    {
+                                        "insertText": {
+                                            "text": args['content'],
+                                            "endOfSegmentLocation": {"segmentId": ""}
+                                        }
+                                    }
+                                ]
+                            }
+                        )
+                        results.append(f"✅ Created Google Doc: {args['title']}")
+                    else:
+                        raise Exception(f"Docs API Error: {res.text}")
+
+                elif tool_name == "browser_navigate":
+                    if page:
+                        await page.goto(args['url'])
+                        await capture_and_stream(page, user_id)
+                        results.append(f"✅ Navigated to {args['url']}")
+
+                elif tool_name == "browser_click":
+                    if page:
+                        await page.click(args['selector'], timeout=5000) # 5s timeout for fail-fast
+                        await capture_and_stream(page, user_id)
+                        results.append(f"✅ Clicked {args['selector']}")
+
+                elif tool_name == "browser_type":
+                    if page:
+                        await page.fill(args['selector'], args['text'], timeout=5000)
+                        await capture_and_stream(page, user_id)
+                        results.append(f"✅ Typed into {args['selector']}")
+
+                elif tool_name == "browser_get_content":
+                    if page:
+                        content = await page.evaluate("document.body.innerText")
+                        truncated = content[:2000] + "..." if len(content) > 2000 else content
+                        results.append(f"📄 Page Content Read ({len(content)} chars)")
+                        # We don't stream content to user, just internal use usually, but good for debug
+
+                await asyncio.sleep(0.5)
+
+            except Exception as step_error:
+                print(f"[Executor] Error in step {tool_name}: {step_error}")
+                
+                # --- 🧠 Self-Correction Logic ---
+                if page and original_query:
+                    await manager.send_payload(user_id, {"type": "status", "data": "⚠️ Error detected. Recalibrating..."})
+                    
+                    # 1. Get Context
+                    page_content = await page.evaluate("document.body.innerText")
+                    page_content_short = page_content[:3000]
+                    
+                    # 2. Ask LLM for Fix
+                    fix_prompt = f"""
+                    The user requested: "{original_query}".
+                    The step '{tool_name}' failed with error: {str(step_error)}.
+                    
+                    Current Page Text Content:
+                    {page_content_short}
+                    
+                    Analyze the page content and the error.
+                    Generate a NEW, REVISED JSON Action Plan to accomplish the user's goal from this point forward.
+                    If the selector was wrong, find a better one from the context or suggest a different approach.
+                    """
+                    
+                    print("[Executor] Triggering Self-Correction...")
+                    new_plan = await agent_planner(access_token, fix_prompt)
+                    
+                    if new_plan:
+                         await manager.send_payload(user_id, {"type": "status", "data": "🧠 Plan Revised. Resuming..."})
+                         # Recursive call with incremented retry count
+                         correction_results = await execute_action_plan(new_plan, access_token, user_id, original_query, retry_count + 1)
+                         results.extend(correction_results)
+                         break # Stop the old plan, the new plan takes over
+                    else:
+                        results.append(f"❌ Could not generate a fix for: {str(step_error)}")
+                        break
+                else:
+                    results.append(f"❌ Failed: {str(step_error)}")
+                    break
 
         if browser:
             await browser.close()
@@ -306,7 +361,7 @@ async def execute_action_plan(action_plan: list, access_token: str, user_id: str
         return results
 
     except Exception as e:
-        print(f"[Executor] Error: {e}")
+        print(f"[Executor] Critical Error: {e}")
         if browser:
             await browser.close()
         return [f"❌ Critical Execution Error: {str(e)}"]
@@ -460,7 +515,7 @@ async def chat_query(chat_req: ChatQuery):
         if action_plan:
             # 3. Execute Actions (passing user_id for streaming)
             print(f"Executing Plan: {action_plan}")
-            execution_results = await execute_action_plan(action_plan, access_token, chat_req.userId)
+            execution_results = await execute_action_plan(action_plan, access_token, chat_req.userId, chat_req.query)
             response_text = "Automation Completed:\n" + "\n".join(execution_results)
         else:
             response_text = "I understood your request, but I didn't generate any specific actions to execute."
@@ -470,6 +525,29 @@ async def chat_query(chat_req: ChatQuery):
     except Exception as e:
         print(f"Chat Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+class SaveAutomationRequest(BaseModel):
+    user_id: str
+    name: str
+    # In a real app, we'd pass the 'action_plan' here too, but for now we'll just simulate saving the last concept
+    description: str
+
+@app.post("/api/automation/save")
+async def save_automation(req: SaveAutomationRequest):
+    try:
+        # Insert into Supabase
+        data = {
+            "user_id": req.user_id,
+            "name": req.name,
+            "description": req.description,
+            "created_at": datetime.now().isoformat()
+        }
+        # Assuming table 'saved_automations' exists
+        supabase.table('saved_automations').insert(data).execute()
+        return {"status": "success", "message": "Automation saved successfully"}
+    except Exception as e:
+        print(f"Save Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save automation")
 
 if __name__ == "__main__":
     import uvicorn
