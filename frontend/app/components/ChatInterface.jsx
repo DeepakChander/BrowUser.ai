@@ -5,7 +5,7 @@ import { Send, Terminal, Tv, LogOut, Activity } from 'lucide-react';
 
 export default function ChatInterface() {
     const [messages, setMessages] = useState([
-        { role: 'agent', content: 'Hello! I am your BrowUser Agent. I can automate your Google tasks. Try asking me to "Draft an email" or "List my files".' }
+        { role: 'agent', content: 'Hello! I am your BrowUser Agent (Python Powered). I can automate your Google tasks. Try asking me to "Draft an email" or "List my files".' }
     ]);
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
@@ -15,21 +15,6 @@ export default function ChatInterface() {
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
-
-    // --- 🔐 Secure Token Fetcher ---
-    const fetchAccessToken = async (uid) => {
-        try {
-            const response = await fetch(`/api/token/refresh?userId=${uid}`);
-            if (!response.ok) {
-                throw new Error('Failed to refresh authentication token');
-            }
-            const data = await response.json();
-            return data.accessToken;
-        } catch (error) {
-            console.error('Token Fetch Error:', error);
-            return null;
-        }
-    };
 
     const handleSend = async (e) => {
         e.preventDefault();
@@ -43,31 +28,36 @@ export default function ChatInterface() {
         try {
             // 1. Get User ID from session
             const userId = localStorage.getItem('browuser_uid');
+
+            // If no user ID, we force a logout/redirect because the user CLEARED their DB
             if (!userId) {
-                throw new Error('User not authenticated');
+                window.location.href = '/'; // Redirect to login
+                return;
             }
 
-            // 2. Fetch a fresh access token (Client-side check)
-            const accessToken = await fetchAccessToken(userId);
-            if (!accessToken) {
-                throw new Error('Could not retrieve valid access token');
-            }
-
-            // 3. Send Query + Token to Backend
-            const response = await fetch('/api/chat/query', {
+            // 2. Send Query to Python Backend
+            // Note: We don't need to fetch the token client-side anymore, the Python backend handles it
+            const response = await fetch('http://localhost:5000/api/chat/query', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     query: userMessage.content,
-                    userId: userId,
-                    accessToken: accessToken // Sending token as requested by prompt
+                    userId: userId
                 }),
             });
 
+            if (!response.ok) {
+                // If 401 or error, it might mean the user doesn't exist in DB anymore
+                if (response.status === 401 || response.status === 500) {
+                    throw new Error("Session expired or User not found");
+                }
+                throw new Error('Network response was not ok');
+            }
+
             const data = await response.json();
 
-            // Handle the specific response format from Step 1.7
-            const agentResponseContent = data.response?.message || data.response || "Processing complete.";
+            // Handle Python response format
+            const agentResponseContent = data.response?.message || "Processing complete.";
 
             const agentMessage = {
                 role: 'agent',
@@ -78,7 +68,7 @@ export default function ChatInterface() {
 
         } catch (error) {
             console.error('Chat Error:', error);
-            setMessages(prev => [...prev, { role: 'agent', content: "Error: Could not connect to the agent. Please try logging in again." }]);
+            setMessages(prev => [...prev, { role: 'agent', content: "Error: Session invalid or Agent unreachable. Please Sign Out and Login again." }]);
         } finally {
             setIsLoading(false);
         }
@@ -129,11 +119,11 @@ export default function ChatInterface() {
                             <div className="w-2.5 h-2.5 rounded-full bg-green-500"></div>
                             <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-green-500 animate-ping opacity-75"></div>
                         </div>
-                        <span className="text-sm font-bold text-gray-700 tracking-wide">AGENT ONLINE</span>
+                        <span className="text-sm font-bold text-gray-700 tracking-wide">AGENT ONLINE (PYTHON)</span>
                     </div>
                     <div className="flex items-center space-x-4">
                         <div className="px-3 py-1 bg-gray-100 rounded-full text-xs font-mono text-gray-500">
-                            v1.2.0-beta
+                            v2.0.0-py
                         </div>
                     </div>
                 </div>
