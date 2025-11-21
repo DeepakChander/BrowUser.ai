@@ -1,57 +1,59 @@
 'use client';
 
-import { useRef, useMemo } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
-import { Points, PointMaterial } from '@react-three/drei';
-import * as THREE from 'three';
+import { useEffect, useState } from 'react';
 
-function NeuralGridPoints({ blur = false, intensity = 1.0 }) {
-    const ref = useRef();
-    const particleCount = 2000;
-
-    // Generate random positions for particles
-    const positions = useMemo(() => {
-        const positions = new Float32Array(particleCount * 3);
-        for (let i = 0; i < particleCount; i++) {
-            positions[i * 3] = (Math.random() - 0.5) * 20;
-            positions[i * 3 + 1] = (Math.random() - 0.5) * 20;
-            positions[i * 3 + 2] = (Math.random() - 0.5) * 20;
-        }
-        return positions;
-    }, []);
-
-    // Animate particles
-    useFrame((state) => {
-        if (ref.current) {
-            ref.current.rotation.x = state.clock.elapsedTime * 0.05;
-            ref.current.rotation.y = state.clock.elapsedTime * 0.075;
-        }
-    });
-
+// CSS Fallback Background (no WebGL required)
+function CSSFallbackBackground({ blur, intensity }) {
     return (
-        <Points ref={ref} positions={positions} stride={3} frustumCulled={false}>
-            <PointMaterial
-                transparent
-                color="#00ffff"
-                size={0.05}
-                sizeAttenuation={true}
-                depthWrite={false}
-                opacity={blur ? 0.3 : intensity}
+        <div className={`fixed inset-0 -z-10 bg-black ${blur ? 'blur-md' : ''}`}>
+            <div
+                className="absolute inset-0 opacity-30"
+                style={{
+                    backgroundImage: `
+            radial-gradient(circle at 20% 50%, rgba(0, 255, 255, ${0.1 * intensity}) 0%, transparent 50%),
+            radial-gradient(circle at 80% 80%, rgba(0, 100, 255, ${0.15 * intensity}) 0%, transparent 50%),
+            radial-gradient(circle at 40% 20%, rgba(0, 255, 255, ${0.08 * intensity}) 0%, transparent 50%)
+          `,
+                    animation: 'pulse 8s ease-in-out infinite'
+                }}
             />
-        </Points>
+            <div
+                className="absolute inset-0"
+                style={{
+                    backgroundImage: 'radial-gradient(circle, rgba(0, 255, 255, 0.03) 1px, transparent 1px)',
+                    backgroundSize: '50px 50px',
+                    opacity: intensity
+                }}
+            />
+            <style jsx>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 0.3; }
+          50% { opacity: 0.5; }
+        }
+      `}</style>
+        </div>
     );
 }
 
+// Main component with WebGL detection
 export default function NeuralGrid({ blur = false, intensity = 1.0 }) {
-    return (
-        <div className="fixed inset-0 -z-10">
-            <Canvas
-                camera={{ position: [0, 0, 5], fov: 75 }}
-                className={blur ? 'blur-md' : ''}
-            >
-                <ambientLight intensity={0.5} />
-                <NeuralGridPoints blur={blur} intensity={intensity} />
-            </Canvas>
-        </div>
-    );
+    const [useCSS, setUseCSS] = useState(false);
+
+    useEffect(() => {
+        // Check if WebGL is supported
+        try {
+            const canvas = document.createElement('canvas');
+            const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+            if (!gl) {
+                console.warn('WebGL not supported, using CSS fallback');
+                setUseCSS(true);
+            }
+        } catch (e) {
+            console.warn('WebGL detection failed, using CSS fallback');
+            setUseCSS(true);
+        }
+    }, []);
+
+    // Always use CSS fallback to avoid WebGL errors
+    return <CSSFallbackBackground blur={blur} intensity={intensity} />;
 }
