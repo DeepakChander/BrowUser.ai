@@ -67,7 +67,7 @@ def get_valid_access_token(user_id: str):
             
         refresh_token = decrypt_token(response.data['refresh_token'])
         
-        # 2. Refresh the Token using Google's Endpoint manually (simpler than using the lib for just refresh)
+        # 2. Refresh the Token using Google's Endpoint manually
         token_url = "https://oauth2.googleapis.com/token"
         data = {
             'client_id': GOOGLE_CLIENT_ID,
@@ -84,62 +84,176 @@ def get_valid_access_token(user_id: str):
         tokens = refresh_response.json()
         new_access_token = tokens['access_token']
         
-        # 3. Update Supabase (if expiry provided)
-        # Note: Google doesn't always return a new refresh token, but always an access token
-        # We update expiry if available
-        if 'expires_in' in tokens:
-             # Calculate expiry date (approximate)
-             # In a real app, calculate exact timestamp
-             pass 
-
         return new_access_token
 
     except Exception as e:
         print(f"Token Refresh Error: {str(e)}")
         raise HTTPException(status_code=401, detail="Could not refresh token")
 
-# --- 🤖 Agent Executor (OpenAI) ---
+# --- 🛠️ Tool Definitions (The Agent's Capabilities) ---
+# These functions define what the agent CAN do.
+# They are used to generate the JSON schema for OpenAI Function Calling.
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "send_gmail",
+            "description": "Sends an email using the user's Gmail account.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipient": {
+                        "type": "string",
+                        "description": "The email address of the recipient."
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "The subject line of the email."
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "The body content of the email."
+                    }
+                },
+                "required": ["recipient", "subject", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_google_doc",
+            "description": "Creates a new Google Document in the user's Drive.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "The title of the new document."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The initial content to write into the document."
+                    }
+                },
+                "required": ["title", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_navigate",
+            "description": "Navigates the browser to a specific URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The full URL to navigate to (e.g., https://www.google.com)."
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_click",
+            "description": "Clicks a specific element on the current page using a CSS selector.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "The CSS selector of the element to click (e.g., #submit-button, .nav-link)."
+                    }
+                },
+                "required": ["selector"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_type",
+            "description": "Types text into an input field identified by a CSS selector.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "The CSS selector of the input field."
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The text to type into the field."
+                    }
+                },
+                "required": ["selector", "text"]
+            }
+        }
+    }
+]
+
+# --- 🤖 Agent Executor (OpenAI Function Calling) ---
 async def agent_executor(access_token: str, query: str):
-    print(f"[Agent] Executing with Token: {access_token[:10]}...")
+    print(f"[Agent] Planning Action for: {query}")
     
     try:
         system_prompt = f"""
 You are BrowUser.ai, an intelligent automation agent.
 You have access to a user's Google account via an Access Token.
-Current Access Token: {access_token} (Do not output this token to the user).
+Your goal is to decompose the user's request into a series of executable actions using the provided tools.
 
-Your capabilities:
-1. Read/Send Emails (Gmail)
-2. Manage Files (Drive)
-3. General Assistance
+DO NOT execute the actions yourself.
+Instead, generate a structured JSON Action Plan by calling the appropriate tools.
+If the user's request requires multiple steps (e.g., "Go to Google and search for cats"), generate multiple tool calls in logical order.
 
-The user has asked: "{query}"
-
-Your goal right now is to:
-1. Acknowledge the user's request.
-2. Explain technically how you WOULD execute it using the Google API.
-3. Confirm that you have the valid credentials to do so.
-
-Keep your response concise and professional.
+If the request is simple conversation, reply normally.
         """
 
         completion = openai.chat.completions.create(
-            model="gpt-3.5-turbo", # Cost-effective model
+            model="gpt-4o", # Using a capable model for reasoning
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query}
-            ]
+            ],
+            tools=tools,
+            tool_choice="auto" # Let the model decide whether to use tools or chat
         )
 
-        return {
-            "message": completion.choices[0].message.content,
-            "accessToken": f"{access_token[:15]}...[truncated]"
-        }
+        response_message = completion.choices[0].message
+
+        # Check if the model decided to call tools
+        if response_message.tool_calls:
+            action_plan = []
+            for tool_call in response_message.tool_calls:
+                action_plan.append({
+                    "name": tool_call.function.name,
+                    "arguments": json.loads(tool_call.function.arguments)
+                })
+            
+            # Return the structured plan
+            return {
+                "type": "action_plan",
+                "message": "I have generated an action plan for your request.",
+                "plan": action_plan
+            }
+        else:
+            # Normal conversation response
+            return {
+                "type": "message",
+                "message": response_message.content
+            }
 
     except Exception as e:
         print(f"OpenAI Error: {str(e)}")
         return {
-            "message": "I connected to the agent brain, but encountered an error processing your request with OpenAI.",
+            "type": "error",
+            "message": "I encountered an error while planning the action.",
             "error": str(e)
         }
 
@@ -151,8 +265,6 @@ def read_root():
 
 @app.get("/auth/google")
 def login_google():
-    # Create flow instance to generate URL
-    # Note: In production, use a proper state parameter for security
     flow = Flow.from_client_config(
         {
             "web": {
@@ -177,7 +289,6 @@ def login_google():
 @app.get("/auth/google/callback")
 def callback_google(code: str):
     try:
-        # Exchange code for tokens
         token_url = "https://oauth2.googleapis.com/token"
         data = {
             'code': code,
@@ -193,42 +304,31 @@ def callback_google(code: str):
         if 'error' in tokens:
             raise Exception(tokens['error'])
 
-        # Get User Info
         user_info_response = requests.get(
             'https://www.googleapis.com/oauth2/v2/userinfo',
             headers={'Authorization': f"Bearer {tokens['access_token']}"}
         )
         user_profile = user_info_response.json()
         
-        # 1. Store/Update User
         user_data = {
             "google_id": user_profile['id'],
             "email": user_profile['email'],
             "display_name": user_profile.get('name', ''),
         }
         
-        # Upsert User
-        user_res = supabase.table('users').upsert(user_data, on_conflict='google_id').execute()
+        supabase.table('users').upsert(user_data, on_conflict='google_id').execute()
         
-        # Supabase python client returns data differently than JS
-        # We need to fetch the ID if upsert doesn't return it clearly in all versions
-        # But usually user_res.data[0]['id'] works if select is implied
-        
-        # Let's fetch the user ID explicitly to be safe
         user_db = supabase.table('users').select('id').eq('google_id', user_profile['id']).single().execute()
         user_id = user_db.data['id']
 
-        # 2. Store Refresh Token
         if 'refresh_token' in tokens:
             token_data = {
                 "user_id": user_id,
                 "service": "google",
                 "refresh_token": encrypt_token(tokens['refresh_token']),
-                # "expires_at": ... (Optional implementation)
             }
             supabase.table('oauth_tokens').upsert(token_data, on_conflict='user_id').execute()
             
-        # Redirect to Frontend with UID
         return RedirectResponse(f"http://localhost:3000/?status=success&uid={user_id}")
 
     except Exception as e:
