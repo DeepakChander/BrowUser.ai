@@ -22,7 +22,22 @@ import random
 # Load environment variables
 load_dotenv()
 
-app = FastAPI()
+# Global Playwright Instance
+playwright_instance = None
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global playwright_instance
+    print("[System] Starting Global Playwright Engine...")
+    playwright_instance = await async_playwright().start()
+    yield
+    print("[System] Stopping Global Playwright Engine...")
+    if playwright_instance:
+        await playwright_instance.stop()
+
+app = FastAPI(lifespan=lifespan)
 
 # CORS Configuration
 app.add_middleware(
@@ -220,6 +235,255 @@ tools = [
         "function": {
             "name": "task_complete",
             "description": "Call this tool when the user's request has been fully satisfied.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "final_answer": {
+                        "type": "string",
+                        "description": "A summary of what was done or the answer to the user's question."
+                    }
+                },
+                "required": ["final_answer"]
+            }
+        }
+    }
+]
+
+# --- ⚡ Execution Engine with ReAct Loop & Stealth Mode ---
+
+async def capture_and_stream(page, user_id: str):
+    """Captures screenshot and streams to frontend via WebSocket"""
+    try:
+        if not page.is_closed():
+            screenshot_bytes = await page.screenshot(type='jpeg', quality=50)
+            base64_str = base64.b64encode(screenshot_bytes).decode('utf-8')
+            await manager.send_payload(user_id, {"type": "image", "data": base64_str})
+    except Exception as e:
+        print(f"[Stream] Capture Error: {e}")
+
+async def execute_react_loop(user_id: str, initial_query: str, access_token: str):
+    """
+    Executes the continuous ReAct loop: Think -> Act -> Observe -> Repeat
+    """
+    global playwright_instance
+    browser = None
+    context = None
+    page = None
+    
+    # Conversation History
+    messages = [
+        {"role": "system", "content": """
+You are BrowUser.ai, an autonomous agent.
+You have access to a browser and Google APIs.
+Your goal is to complete the user's request by executing a series of actions.
+
+IMPORTANT:
+1. You must call 'task_complete' when you are finished.
+2. If you need to read a page, use 'browser_get_content'.
+3. If you need to search, navigate to google.com, type the query, click search, AND THEN READ THE RESULTS.
+4. Be persistent. If an action fails, try a different approach.
+5. If you encounter a CAPTCHA or Anti-Bot page, call 'task_complete' with a failure message.
+6. If the user asks to 'log in' or 'wait', use the 'wait_for_user' tool.
+        """},
+        {"role": "user", "content": initial_query}
+    ]
+
+    try:
+        print("[ReAct] Starting Loop...")
+        
+        # Use global instance
+        if not playwright_instance:
+             print("[ReAct] Error: Playwright not initialized")
+             return "❌ System Error: Browser Engine not ready."
+        
+        # --- 🕵️ Browser Launch Strategy ---
+        user_data_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Google", "Chrome", "User Data")
+        using_real_profile = False
+
+        try:
+            print(f"[ReAct] Attempting to launch Real Chrome Profile from: {user_data_dir}")
+            context = await playwright_instance.chromium.launch_persistent_context(
+                user_data_dir,
+                channel="chrome",
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                viewport={"width": 1920, "height": 1080}
+            )
+            using_real_profile = True
+            print("[ReAct] ✅ Successfully attached to Real Chrome Profile!")
+            await manager.send_payload(user_id, {"type": "status", "data": "✅ Using your Real Chrome Profile"})
+            
+        except Exception as e:
+            print(f"[ReAct] ⚠️ Could not use Real Profile (Chrome likely open). Falling back to Stealth Mode. Error: {e}")
+            await manager.send_payload(user_id, {"type": "status", "data": "⚠️ Main Chrome is busy. Close it to use your saved login, or log in manually here."})
+            
+            # Fallback: Launch fresh browser
+            user_agents = [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ]
+            browser = await playwright_instance.chromium.launch(
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-infobars", "--start-maximized"]
+            )
+            context = await browser.new_context(
+                user_agent=random.choice(user_agents),
+                viewport={"width": 1920, "height": 1080},
+                java_script_enabled=True
+            )
+            # Inject stealth script
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+        # Get the page
+        if context.pages:
+            page = context.pages[0]
+        else:
+            page = await context.new_page()
+            
+        await capture_and_stream(page, user_id)
+
+        loop_count = 0
+        max_loops = 15 
+
+        while loop_count < max_loops:
+            loop_count += 1
+            print(f"[ReAct] Step {loop_count}")
+            
+            # 1. THINK (Call LLM)
+            completion = openai.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                tools=tools,
+                tool_choice="auto"
+            )
+            
+            response_message = completion.choices[0].message
+            messages.append(response_message) 
+
+            # 2. ACT (Check for tool calls)
+            if response_message.tool_calls:
+                for tool_call in response_message.tool_calls:
+                    tool_name = tool_call.function.name
+                    args = json.loads(tool_call.function.arguments)
+                    call_id = tool_call.id
+                    
+                    print(f"[ReAct] Action: {tool_name} args: {args}")
+                    await manager.send_payload(user_id, {"type": "status", "data": f"Step {loop_count}: {tool_name}..."})
+
+                    observation = ""
+                    
+                    # 3. OBSERVE (Execute Tool)
+                    try:
+                        if tool_name == "task_complete":
+                            final_answer = args['final_answer']
+                            await manager.send_payload(user_id, {"type": "status", "data": "✅ Task Completed"})
+                            
+                            # Cleanup
+                            if context: await context.close()
+                            if browser: await browser.close()
+                            # DO NOT STOP PLAYWRIGHT HERE
+                            return final_answer
+
+                        elif tool_name == "wait_for_user":
+                            seconds = args.get('seconds', 30)
+                            for i in range(seconds):
+                                if i % 5 == 0: await capture_and_stream(page, user_id)
+                                await asyncio.sleep(1)
+                            observation = f"Waited for {seconds} seconds."
+
+                        elif tool_name == "send_gmail":
+                            message = MIMEText(args['body'])
+                            message['to'] = args['recipient']
+                            message['subject'] = args['subject']
+                            raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+                            res = requests.post(
+                                'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+                                headers={'Authorization': f'Bearer {access_token}'},
+                                json={'raw': raw_message}
+                            )
+                            if res.status_code == 200:
+                                observation = f"Email sent successfully to {args['recipient']}"
+                            else:
+                                observation = f"Failed to send email: {res.text}"
+
+                        elif tool_name == "create_google_doc":
+                            res = requests.post(
+                                'https://docs.googleapis.com/v1/documents',
+                                headers={'Authorization': f'Bearer {access_token}'},
+                                json={'title': args['title']}
+                            )
+                            if res.status_code == 200:
+                                doc_id = res.json().get('documentId')
+                                requests.post(
+                                    f'https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate',
+                                    headers={'Authorization': f'Bearer {access_token}'},
+                                    json={
+                                        "requests": [
+                                            {
+                                                "insertText": {
+                                                    "text": args['content'],
+                                                    "endOfSegmentLocation": {"segmentId": ""}
+                                                }
+                                            }
+                                        ]
+                                    }
+                                )
+                                observation = f"Created Google Doc '{args['title']}' with ID: {doc_id}"
+                            else:
+                                observation = f"Failed to create doc: {res.text}"
+
+                        elif tool_name == "browser_navigate":
+                            await page.goto(args['url'])
+                            await capture_and_stream(page, user_id)
+                            observation = f"Navigated to {args['url']}"
+
+                        elif tool_name == "browser_click":
+                            await page.click(args['selector'], timeout=5000)
+                            await capture_and_stream(page, user_id)
+                            observation = f"Clicked element {args['selector']}"
+
+                        elif tool_name == "browser_type":
+                            await page.fill(args['selector'], args['text'], timeout=5000)
+                            await capture_and_stream(page, user_id)
+                            observation = f"Typed '{args['text']}' into {args['selector']}"
+
+                        elif tool_name == "browser_get_content":
+                            content = await page.evaluate("document.body.innerText")
+                            truncated = content[:3000] 
+                            observation = f"Page Content: {truncated}..."
+                        
+                        await asyncio.sleep(1)
+
+                    except Exception as e:
+                        observation = f"Error executing {tool_name}: {str(e)}"
+                        print(f"[ReAct] Error: {observation}")
+
+                    # 4. FEEDBACK (Add observation to history)
+                    messages.append({
+                        "tool_call_id": call_id,
+                        "role": "tool",
+                        "name": tool_name,
+                        "content": observation
+                    })
+            else:
+                print("[ReAct] LLM replied without tool.")
+                return response_message.content
+
+        if context: await context.close()
+        if browser: await browser.close()
+        # DO NOT STOP PLAYWRIGHT HERE
+        return "❌ Task timed out (max steps reached)."
+
+    except Exception as e:
+        print(f"[ReAct] Critical Error: {e}")
+        try:
+            if context: await context.close()
+            if browser: await browser.close()
+        except: pass
+        return f"❌ Critical Error: {str(e)}"
+
+
+# --- Routes ---
 
 @app.get("/")
 def read_root():
@@ -232,6 +496,9 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
+        manager.disconnect(user_id)
+    except Exception as e:
+        print(f"[WS] Error: {e}")
         manager.disconnect(user_id)
 
 @app.get("/auth/google")
