@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 5000;
 // Middleware to parse JSON bodies
 app.use(express.json());
 
-// Supabase Client (using Service Role Key for server-side security)
+// Supabase Client
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
@@ -25,7 +25,6 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CALLBACK_URL
 );
 
-// Define the scopes needed for your agent
 const SCOPES = [
   'https://www.googleapis.com/auth/userinfo.email',
   'https://www.googleapis.com/auth/userinfo.profile',
@@ -34,90 +33,66 @@ const SCOPES = [
 ];
 
 // --- 🔒 Encryption Placeholders ---
-function encryptToken(token) {
-  // TODO: Implement robust encryption (e.g., AES-256)
-  return token;
-}
-
-function decryptToken(encryptedToken) {
-  // TODO: Implement robust decryption
-  return encryptedToken;
-}
+function encryptToken(token) { return token; }
+function decryptToken(encryptedToken) { return encryptedToken; }
 
 // --- 🔄 Token Refresh Utility ---
 async function getValidAccessToken(userId) {
   try {
-    // 1. Fetch the encrypted refresh token from Supabase
     const { data: tokenData, error: dbError } = await supabase
       .from('oauth_tokens')
       .select('refresh_token')
       .eq('user_id', userId)
       .single();
 
-    if (dbError || !tokenData) {
-      throw new Error('User token not found');
-    }
+    if (dbError || !tokenData) throw new Error('User token not found');
 
-    // 2. Decrypt the refresh token
     const refreshToken = decryptToken(tokenData.refresh_token);
+    oauth2Client.setCredentials({ refresh_token: refreshToken });
 
-    // 3. Set credentials on the OAuth client
-    oauth2Client.setCredentials({
-      refresh_token: refreshToken
-    });
-
-    // 4. Request a new Access Token
     const { token: newAccessToken, res: tokenResponse } = await oauth2Client.getAccessToken();
 
-    if (!newAccessToken) {
-      throw new Error('Failed to refresh access token');
-    }
+    if (!newAccessToken) throw new Error('Failed to refresh access token');
 
-    // 5. Update Supabase with new token details if they changed
     if (tokenResponse && tokenResponse.data && tokenResponse.data.expiry_date) {
       await supabase
         .from('oauth_tokens')
-        .update({
-          expires_at: new Date(tokenResponse.data.expiry_date).toISOString()
-        })
+        .update({ expires_at: new Date(tokenResponse.data.expiry_date).toISOString() })
         .eq('user_id', userId);
     }
 
     return newAccessToken;
-
   } catch (error) {
     console.error('Token Refresh Error:', error.message);
     throw error;
   }
 }
 
-// --- 🤖 Agent Executor Placeholder ---
+// --- 🤖 Agent Executor (Gemini Placeholder) ---
 async function agentExecutor(accessToken, query) {
-  // This is where the Gemini API integration will go.
-  // For now, we just confirm we have the tools ready.
-  console.log(`[Agent] Received Query: "${query}"`);
-  console.log(`[Agent] Using Access Token: ${accessToken.substring(0, 10)}...`);
+  // Placeholder for Gemini API integration
+  console.log(`[Agent] Executing with Token: ${accessToken.substring(0, 10)}...`);
 
-  return `I received your request: "${query}". I have a valid Google Access Token and I am ready to execute this task. (Gemini Integration Coming Soon)`;
+  return {
+    message: `Agent received valid token. Preparing to execute task: "${query}"`,
+    accessToken: `${accessToken.substring(0, 15)}...[truncated]`
+  };
 }
 
 // --- Routes ---
 
-// 1. Initiates the Google login process
 app.get('/auth/google', (req, res) => {
   const authorizationUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline', // CRITICAL: Ensures we get a refresh token
+    access_type: 'offline',
     scope: SCOPES,
     include_granted_scopes: true,
-    prompt: 'consent' // Forces consent screen to ensure refresh token is returned
+    prompt: 'consent'
   });
   res.redirect(authorizationUrl);
 });
 
-// 2. Handles the redirect from Google
 app.get('/auth/google/callback', async (req, res) => {
   const { code } = req.query;
-
   try {
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
@@ -125,7 +100,6 @@ app.get('/auth/google/callback', async (req, res) => {
     const userinfo = google.oauth2({ version: 'v2', auth: oauth2Client });
     const profile = await userinfo.userinfo.get();
 
-    // 1. Store/Update User
     const { data: userData, error: userError } = await supabase
       .from('users')
       .upsert({
@@ -139,7 +113,6 @@ app.get('/auth/google/callback', async (req, res) => {
     if (userError) throw userError;
     const user_id = userData.id;
 
-    // 2. Store Refresh Token
     if (tokens.refresh_token) {
       const { error: tokenError } = await supabase
         .from('oauth_tokens')
@@ -153,32 +126,26 @@ app.get('/auth/google/callback', async (req, res) => {
       if (tokenError) throw tokenError;
     }
 
-    // Redirect with userId (TEMPORARY FOR DEMO - In production use Session/Cookie)
     res.redirect(`http://localhost:3000/?status=success&uid=${user_id}`);
-
   } catch (error) {
     console.error('OAuth Error:', error);
     res.redirect('http://localhost:3000/?status=error');
   }
 });
 
-// 3. API Endpoint to get a fresh token (Protected)
 app.get('/api/token/refresh', async (req, res) => {
   const { userId } = req.query;
-
-  if (!userId) {
-    return res.status(400).json({ error: 'Missing userId' });
-  }
+  if (!userId) return res.status(400).json({ error: 'Missing userId' });
 
   try {
     const accessToken = await getValidAccessToken(userId);
     res.json({ accessToken });
   } catch (error) {
-    res.status(401).json({ error: 'Unauthorized: Could not refresh token' });
+    res.status(401).json({ error: 'Unauthorized' });
   }
 });
 
-// 4. Chat Query Endpoint
+// --- New Chat Route ---
 app.post('/api/chat/query', async (req, res) => {
   const { query, userId } = req.body;
 
@@ -187,11 +154,12 @@ app.post('/api/chat/query', async (req, res) => {
   }
 
   try {
-    // 1. Get a fresh access token
-    const accessToken = await getValidAccessToken(userId);
+    // 1. Credential Check (Server-side validation)
+    // Even if client sent a token, we verify/refresh it here to be safe
+    const validAccessToken = await getValidAccessToken(userId);
 
-    // 2. Execute the agent logic
-    const response = await agentExecutor(accessToken, query);
+    // 2. Execute Agent
+    const response = await agentExecutor(validAccessToken, query);
 
     res.json({ response });
 

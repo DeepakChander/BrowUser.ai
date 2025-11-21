@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Terminal, Tv, LogOut } from 'lucide-react';
+import { Send, Terminal, Tv, LogOut, Activity } from 'lucide-react';
 
 export default function ChatInterface() {
     const [messages, setMessages] = useState([
@@ -17,19 +17,18 @@ export default function ChatInterface() {
     }, [messages]);
 
     // --- 🔐 Secure Token Fetcher ---
-    const fetchAccessToken = async () => {
-        // In a real app, you'd get the userId from a secure session/context
-        // For this demo, we'll assume a userId is available or stored in localStorage
-        // NOTE: You might need to temporarily hardcode a userId for testing if you don't have session management yet
-        const userId = 'YOUR_TEST_USER_ID'; // TODO: Replace with actual logic to get current user ID
-
-        // If we don't have a user ID in this context, we might need to rely on the backend session
-        // For this step, let's assume the backend handles session or we pass a placeholder
-        // In a real implementation, the cookie would handle the session.
-
-        // For the purpose of this specific prompt step, we will just call the chat endpoint
-        // The chat endpoint itself will handle the token refresh internally on the backend
-        return null;
+    const fetchAccessToken = async (uid) => {
+        try {
+            const response = await fetch(`/api/token/refresh?userId=${uid}`);
+            if (!response.ok) {
+                throw new Error('Failed to refresh authentication token');
+            }
+            const data = await response.json();
+            return data.accessToken;
+        } catch (error) {
+            console.error('Token Fetch Error:', error);
+            return null;
+        }
     };
 
     const handleSend = async (e) => {
@@ -42,36 +41,51 @@ export default function ChatInterface() {
         setIsLoading(true);
 
         try {
-            // Use the stored user ID
+            // 1. Get User ID from session
             const userId = localStorage.getItem('browuser_uid');
+            if (!userId) {
+                throw new Error('User not authenticated');
+            }
 
+            // 2. Fetch a fresh access token (Client-side check)
+            const accessToken = await fetchAccessToken(userId);
+            if (!accessToken) {
+                throw new Error('Could not retrieve valid access token');
+            }
+
+            // 3. Send Query + Token to Backend
             const response = await fetch('/api/chat/query', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     query: userMessage.content,
-                    userId: userId
+                    userId: userId,
+                    accessToken: accessToken // Sending token as requested by prompt
                 }),
             });
 
             const data = await response.json();
 
+            // Handle the specific response format from Step 1.7
+            const agentResponseContent = data.response?.message || data.response || "Processing complete.";
+
             const agentMessage = {
                 role: 'agent',
-                content: data.response || "I received your request but couldn't process it."
+                content: agentResponseContent
             };
 
             setMessages(prev => [...prev, agentMessage]);
 
         } catch (error) {
             console.error('Chat Error:', error);
-            setMessages(prev => [...prev, { role: 'agent', content: "Error: Could not connect to the agent." }]);
+            setMessages(prev => [...prev, { role: 'agent', content: "Error: Could not connect to the agent. Please try logging in again." }]);
         } finally {
             setIsLoading(false);
         }
     };
 
     const handleLogout = () => {
+        localStorage.removeItem('browuser_uid');
         window.location.href = '/';
     };
 
@@ -79,7 +93,7 @@ export default function ChatInterface() {
         <div className="flex h-screen bg-gray-50 text-black font-sans overflow-hidden">
 
             {/* Left Sidebar (Navigation/History) */}
-            <div className="w-64 bg-white border-r border-gray-200 flex flex-col">
+            <div className="w-64 bg-white border-r border-gray-200 flex flex-col hidden md:flex">
                 <div className="p-6 border-b border-gray-100 flex items-center space-x-2">
                     <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center text-cyan-400">
                         <Terminal size={18} />
@@ -89,7 +103,7 @@ export default function ChatInterface() {
 
                 <div className="flex-1 overflow-y-auto p-4 space-y-2">
                     <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">History</div>
-                    <div className="p-3 bg-gray-100 rounded-lg text-sm font-medium text-gray-700 cursor-pointer hover:bg-gray-200 transition-colors">
+                    <div className="p-3 bg-gray-100 rounded-lg text-sm font-medium text-gray-700 cursor-pointer hover:bg-gray-200 transition-colors border border-transparent hover:border-gray-300">
                         New Automation Session
                     </div>
                 </div>
@@ -97,7 +111,7 @@ export default function ChatInterface() {
                 <div className="p-4 border-t border-gray-100">
                     <button
                         onClick={handleLogout}
-                        className="flex items-center space-x-2 text-gray-500 hover:text-red-500 transition-colors text-sm font-medium w-full"
+                        className="flex items-center space-x-2 text-gray-500 hover:text-red-500 transition-colors text-sm font-medium w-full px-2 py-2 rounded-lg hover:bg-red-50"
                     >
                         <LogOut size={16} />
                         <span>Sign Out</span>
@@ -109,10 +123,18 @@ export default function ChatInterface() {
             <div className="flex-1 flex flex-col">
 
                 {/* Header */}
-                <div className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-8">
+                <div className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-8 shadow-sm z-10">
                     <div className="flex items-center space-x-2">
-                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-                        <span className="text-sm font-medium text-gray-600">Agent Online</span>
+                        <div className="relative">
+                            <div className="w-2.5 h-2.5 rounded-full bg-green-500"></div>
+                            <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-green-500 animate-ping opacity-75"></div>
+                        </div>
+                        <span className="text-sm font-bold text-gray-700 tracking-wide">AGENT ONLINE</span>
+                    </div>
+                    <div className="flex items-center space-x-4">
+                        <div className="px-3 py-1 bg-gray-100 rounded-full text-xs font-mono text-gray-500">
+                            v1.2.0-beta
+                        </div>
                     </div>
                 </div>
 
@@ -120,11 +142,11 @@ export default function ChatInterface() {
                 <div className="flex-1 flex overflow-hidden">
 
                     {/* Chat Area (Center) */}
-                    <div className="flex-1 flex flex-col max-w-3xl mx-auto w-full bg-gray-50">
-                        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                    <div className="flex-1 flex flex-col max-w-4xl mx-auto w-full bg-gray-50/50">
+                        <div className="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
                             {messages.map((msg, idx) => (
-                                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                    <div className={`max-w-[80%] p-4 rounded-2xl text-sm leading-relaxed shadow-sm ${msg.role === 'user'
+                                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-in fade-in slide-in-from-bottom-2 duration-300`}>
+                                    <div className={`max-w-[85%] p-5 rounded-2xl text-sm leading-relaxed shadow-sm ${msg.role === 'user'
                                         ? 'bg-black text-white rounded-tr-none'
                                         : 'bg-white text-gray-800 border border-gray-200 rounded-tl-none'
                                         }`}>
@@ -133,11 +155,10 @@ export default function ChatInterface() {
                                 </div>
                             ))}
                             {isLoading && (
-                                <div className="flex justify-start">
-                                    <div className="bg-white p-4 rounded-2xl rounded-tl-none border border-gray-200 shadow-sm flex space-x-1">
-                                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce delay-75"></div>
-                                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce delay-150"></div>
+                                <div className="flex justify-start animate-in fade-in duration-300">
+                                    <div className="bg-white p-4 rounded-2xl rounded-tl-none border border-gray-200 shadow-sm flex items-center space-x-2">
+                                        <Activity size={16} className="text-cyan-500 animate-spin" />
+                                        <span className="text-xs text-gray-500 font-medium">Processing...</span>
                                     </div>
                                 </div>
                             )}
@@ -145,19 +166,19 @@ export default function ChatInterface() {
                         </div>
 
                         {/* Input Area */}
-                        <div className="p-6 bg-gray-50">
-                            <form onSubmit={handleSend} className="relative flex items-center">
+                        <div className="p-6 bg-white border-t border-gray-200">
+                            <form onSubmit={handleSend} className="relative flex items-center max-w-4xl mx-auto">
                                 <input
                                     type="text"
                                     value={input}
                                     onChange={(e) => setInput(e.target.value)}
                                     placeholder="Ask the agent to do something..."
-                                    className="w-full p-4 pr-14 bg-white border border-gray-300 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent transition-all"
+                                    className="w-full p-4 pr-14 bg-gray-50 border border-gray-200 rounded-xl shadow-inner focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:bg-white transition-all"
                                 />
                                 <button
                                     type="submit"
                                     disabled={isLoading}
-                                    className="absolute right-2 p-2 bg-black text-white rounded-lg hover:bg-gray-800 disabled:opacity-50 transition-colors"
+                                    className="absolute right-2 p-2.5 bg-black text-white rounded-lg hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all hover:scale-105 active:scale-95"
                                 >
                                     <Send size={18} />
                                 </button>
@@ -166,34 +187,52 @@ export default function ChatInterface() {
                     </div>
 
                     {/* Live Preview Area (Right) */}
-                    <div className="w-[400px] bg-white border-l border-gray-200 p-6 hidden xl:flex flex-col">
-                        <div className="flex items-center space-x-2 mb-4 text-gray-800 font-bold">
-                            <Tv size={20} />
-                            <span>Live Preview</span>
+                    <div className="w-[450px] bg-white border-l border-gray-200 p-6 hidden xl:flex flex-col shadow-xl z-20">
+                        <div className="flex items-center justify-between mb-6">
+                            <div className="flex items-center space-x-2 text-gray-900 font-bold text-lg">
+                                <Tv size={22} />
+                                <span>Live Automation Preview</span>
+                            </div>
+                            <div className="w-2 h-2 rounded-full bg-red-500"></div>
                         </div>
 
                         {/* Placeholder TV Box */}
-                        <div className="flex-1 bg-black rounded-2xl relative overflow-hidden shadow-inner flex items-center justify-center group">
-                            <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-20"></div>
+                        <div className="flex-1 bg-gray-900 rounded-2xl relative overflow-hidden shadow-2xl flex items-center justify-center group border-4 border-gray-800">
+                            {/* Screen Texture */}
+                            <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-30"></div>
+                            <div className="absolute inset-0 bg-gradient-to-tr from-black via-transparent to-white/5"></div>
 
-                            <div className="text-center space-y-3 p-6">
-                                <div className="w-16 h-16 border-4 border-cyan-500/30 border-t-cyan-500 rounded-full animate-spin mx-auto"></div>
-                                <p className="text-gray-400 text-sm font-mono">Waiting for visual stream...</p>
+                            {/* Content */}
+                            <div className="text-center space-y-4 p-8 relative z-10">
+                                <div className="relative mx-auto w-20 h-20">
+                                    <div className="absolute inset-0 border-4 border-cyan-500/20 rounded-full animate-ping"></div>
+                                    <div className="relative w-20 h-20 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin"></div>
+                                </div>
+                                <div>
+                                    <p className="text-cyan-400 text-sm font-mono font-bold tracking-wider">AWAITING SIGNAL</p>
+                                    <p className="text-gray-500 text-xs mt-1">Visual stream inactive</p>
+                                </div>
                             </div>
 
                             {/* Overlay Scanline Effect */}
-                            <div className="absolute inset-0 bg-gradient-to-b from-transparent via-white/5 to-transparent pointer-events-none animate-[scan_4s_linear_infinite]"></div>
+                            <div className="absolute inset-0 bg-gradient-to-b from-transparent via-white/5 to-transparent pointer-events-none animate-[scan_3s_linear_infinite]"></div>
+
+                            {/* CRT Flicker */}
+                            <div className="absolute inset-0 bg-white/5 animate-pulse pointer-events-none mix-blend-overlay"></div>
                         </div>
 
-                        <div className="mt-4 p-4 bg-gray-50 rounded-xl border border-gray-100">
-                            <div className="text-xs font-bold text-gray-500 uppercase mb-2">System Status</div>
-                            <div className="flex items-center justify-between text-sm">
-                                <span className="text-gray-600">Connection</span>
-                                <span className="text-green-600 font-medium">Stable</span>
+                        {/* System Stats */}
+                        <div className="mt-6 grid grid-cols-2 gap-4">
+                            <div className="p-4 bg-gray-50 rounded-xl border border-gray-100">
+                                <div className="text-[10px] font-bold text-gray-400 uppercase mb-1">Status</div>
+                                <div className="text-sm font-bold text-green-600 flex items-center gap-1">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-green-500"></div>
+                                    Standby
+                                </div>
                             </div>
-                            <div className="flex items-center justify-between text-sm mt-1">
-                                <span className="text-gray-600">Latency</span>
-                                <span className="text-gray-800 font-medium">24ms</span>
+                            <div className="p-4 bg-gray-50 rounded-xl border border-gray-100">
+                                <div className="text-[10px] font-bold text-gray-400 uppercase mb-1">Latency</div>
+                                <div className="text-sm font-bold text-gray-800">-- ms</div>
                             </div>
                         </div>
                     </div>
