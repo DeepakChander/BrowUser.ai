@@ -532,17 +532,56 @@ IMPORTANT RULES:
                             observation = f"Typed '{args['text']}' into {args['selector']} and pressed Enter"
 
                         elif tool_name == "browser_get_content":
-                            # Enhanced content extraction
-                            await page.wait_for_load_state('domcontentloaded')
-                            content = await page.evaluate("document.body.innerText")
-                            if not content or len(content) < 50:
-                                # Fallback to HTML if text is too short
-                                content = await page.content()
+                            # Enhanced content extraction with Popup Handling
+                            try:
+                                # 1. Attempt to handle Cookie Popups (Google, etc.)
+                                popup_selectors = [
+                                    "button[id='L2AGLb']", # Google 'Accept all'
+                                    "button:has-text('Accept all')",
+                                    "button:has-text('I agree')",
+                                    "button:has-text('Accept cookies')",
+                                    "[aria-label='Accept all']"
+                                ]
+                                for selector in popup_selectors:
+                                    try:
+                                        if await page.locator(selector).is_visible(timeout=500):
+                                            print(f"[Browser] Dismissing popup with selector: {selector}")
+                                            await page.click(selector)
+                                            await asyncio.sleep(1) # Wait for dismissal
+                                            break
+                                    except: pass
+
+                                # 2. Wait for content to settle
+                                try:
+                                    await page.wait_for_load_state('networkidle', timeout=3000)
+                                except:
+                                    await asyncio.sleep(2) # Fallback wait
+
+                                # 3. Smart Extraction
+                                # Try to find the main content area first to avoid nav/footer noise
+                                main_content = ""
+                                target_selectors = ["main", "#search", "#rso", "div[role='main']", "body"]
+                                
+                                for selector in target_selectors:
+                                    try:
+                                        if await page.locator(selector).count() > 0:
+                                            main_content = await page.locator(selector).first.inner_text()
+                                            if len(main_content) > 100:
+                                                print(f"[Browser] Extracted content from '{selector}'")
+                                                break
+                                    except: pass
+                                
+                                if not main_content:
+                                    main_content = await page.evaluate("document.body.innerText")
+
+                                if not main_content or len(main_content) < 50:
+                                    # Fallback to HTML if text is too short
+                                    main_content = await page.content()
                             
-                            truncated = content[:4000] 
-                            observation = f"Page Content: {truncated}..."
-                        
-                        await asyncio.sleep(1)
+                                truncated = main_content[:4000] 
+                                observation = f"Page Content: {truncated}..."
+                            except Exception as e:
+                                observation = f"Error reading content: {str(e)}"
 
                     except Exception as e:
                         observation = f"Error executing {tool_name}: {str(e)}"
