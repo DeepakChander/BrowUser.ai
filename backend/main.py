@@ -297,6 +297,17 @@ IMPORTANT:
             });
         """)
 
+        # --- 🍪 Session Injection (The Golden Key) ---
+        # We use a persistent storage file for cookies
+        auth_file = f"auth_state_{user_id}.json"
+        
+        if os.path.exists(auth_file):
+            print(f"[Session] Loading saved session from {auth_file}")
+            # Load cookies into the context
+            await context.add_cookies(json.load(open(auth_file)))
+        else:
+            print("[Session] No saved session found. Starting fresh.")
+
         page = await context.new_page()
         await capture_and_stream(page, user_id)
 
@@ -335,6 +346,13 @@ IMPORTANT:
                         if tool_name == "task_complete":
                             final_answer = args['final_answer']
                             await manager.send_payload(user_id, {"type": "status", "data": "✅ Task Completed"})
+                            
+                            # Save cookies on successful completion if we logged in
+                            cookies = await context.cookies()
+                            with open(auth_file, 'w') as f:
+                                json.dump(cookies, f)
+                                print(f"[Session] Saved session to {auth_file}")
+
                             if browser:
                                 await browser.close()
                                 await playwright.stop()
