@@ -17,6 +17,7 @@ from google.auth.transport.requests import Request as GoogleRequest
 import requests
 from datetime import datetime
 from playwright.async_api import async_playwright
+import random
 
 # Load environment variables
 load_dotenv()
@@ -219,7 +220,7 @@ tools = [
     }
 ]
 
-# --- ⚡ Execution Engine with ReAct Loop ---
+# --- ⚡ Execution Engine with ReAct Loop & Stealth Mode ---
 
 async def capture_and_stream(page, user_id: str):
     """Captures screenshot and streams to frontend via WebSocket"""
@@ -249,22 +250,58 @@ IMPORTANT:
 2. If you need to read a page, use 'browser_get_content'.
 3. If you need to search, navigate to google.com, type the query, click search, AND THEN READ THE RESULTS.
 4. Be persistent. If an action fails, try a different approach.
+5. If you encounter a CAPTCHA or Anti-Bot page, call 'task_complete' with a failure message.
         """},
         {"role": "user", "content": initial_query}
     ]
 
     try:
-        print("[ReAct] Starting Loop...")
+        print("[ReAct] Starting Loop with Stealth Mode...")
         
-        # Launch Browser upfront (we almost always need it)
+        # --- 🕵️ Stealth Configuration ---
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0"
+        ]
+        selected_ua = random.choice(user_agents)
+
         playwright = await async_playwright().start()
-        browser = await playwright.chromium.launch(headless=False)
-        context = await browser.new_context()
+        
+        # Launch with arguments to hide automation flags
+        browser = await playwright.chromium.launch(
+            headless=False,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-infobars",
+                "--start-maximized"
+            ]
+        )
+        
+        # Create context with specific viewport and user agent
+        context = await browser.new_context(
+            user_agent=selected_ua,
+            viewport={"width": 1920, "height": 1080},
+            locale="en-US",
+            timezone_id="America/New_York",
+            permissions=["geolocation"],
+            geolocation={"latitude": 40.7128, "longitude": -74.0060},
+            java_script_enabled=True
+        )
+        
+        # Inject script to remove navigator.webdriver property
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        """)
+
         page = await context.new_page()
         await capture_and_stream(page, user_id)
 
         loop_count = 0
-        max_loops = 15 # Safety limit
+        max_loops = 15 
 
         while loop_count < max_loops:
             loop_count += 1
@@ -279,7 +316,7 @@ IMPORTANT:
             )
             
             response_message = completion.choices[0].message
-            messages.append(response_message) # Add agent's thought to history
+            messages.append(response_message) 
 
             # 2. ACT (Check for tool calls)
             if response_message.tool_calls:
@@ -361,10 +398,9 @@ IMPORTANT:
 
                         elif tool_name == "browser_get_content":
                             content = await page.evaluate("document.body.innerText")
-                            truncated = content[:3000] # Limit context window usage
+                            truncated = content[:3000] 
                             observation = f"Page Content: {truncated}..."
                         
-                        # Small delay for visual feedback
                         await asyncio.sleep(1)
 
                     except Exception as e:
@@ -379,12 +415,9 @@ IMPORTANT:
                         "content": observation
                     })
             else:
-                # LLM didn't call a tool, maybe it's asking a question or chatting
-                # In a strict agent loop, we might force it to use tools, but here we'll just return the text
                 print("[ReAct] LLM replied without tool.")
                 return response_message.content
 
-        # Loop limit reached
         if browser:
             await browser.close()
             await playwright.stop()
