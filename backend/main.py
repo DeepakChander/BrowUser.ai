@@ -601,6 +601,10 @@ async def list_automations(user_id: str):
         response = supabase.table('saved_automations').select('*').eq('user_id', user_id).execute()
         return {"automations": response.data}
     except Exception as e:
+        # Check if it's a "relation not found" error (PGRST205)
+        if "PGRST205" in str(e) or "relation" in str(e) and "does not exist" in str(e):
+            print(f"List Warning: Table 'saved_automations' not found. Returning empty list.")
+            return {"automations": []}
         print(f"List Error: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch automations")
 
@@ -608,8 +612,16 @@ async def list_automations(user_id: str):
 async def analyze_automations(user_id: str):
     try:
         # Fetch saved automations
-        saved_response = supabase.table('saved_automations').select('*').eq('user_id', user_id).execute()
-        saved_automations = saved_response.data
+        saved_automations = []
+        try:
+            saved_response = supabase.table('saved_automations').select('*').eq('user_id', user_id).execute()
+            saved_automations = saved_response.data
+        except Exception as e:
+             if "PGRST205" in str(e) or "relation" in str(e) and "does not exist" in str(e):
+                print(f"Analyze Warning: Table 'saved_automations' not found. Using defaults.")
+                saved_automations = []
+             else:
+                 raise e
         
         # In a real scenario, we would also fetch a 'task_history' table.
         # For now, we will simulate history based on saved automations to generate suggestions.
