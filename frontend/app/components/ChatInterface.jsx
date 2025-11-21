@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Terminal, Tv, LogOut, Activity, Wifi, WifiOff, Save, RefreshCw } from 'lucide-react';
+import { Send, Terminal, Tv, LogOut, Activity, Wifi, WifiOff, Save, RefreshCw, Play, BookOpen } from 'lucide-react';
 
 export default function ChatInterface() {
     const [messages, setMessages] = useState([
@@ -10,9 +10,10 @@ export default function ChatInterface() {
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [liveImage, setLiveImage] = useState(null);
-    const [statusText, setStatusText] = useState('Standby'); // New status text state
+    const [statusText, setStatusText] = useState('Standby');
     const [wsStatus, setWsStatus] = useState('disconnected');
-    const [showSaveOption, setShowSaveOption] = useState(false); // To show save button
+    const [showSaveOption, setShowSaveOption] = useState(false);
+    const [savedAutomations, setSavedAutomations] = useState([]);
     const messagesEndRef = useRef(null);
     const wsRef = useRef(null);
 
@@ -20,6 +21,21 @@ export default function ChatInterface() {
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
+
+    // Fetch Saved Automations
+    useEffect(() => {
+        const userId = localStorage.getItem('browuser_uid');
+        if (userId) {
+            fetch(`http://localhost:5000/api/automation/list/${userId}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.automations) {
+                        setSavedAutomations(data.automations);
+                    }
+                })
+                .catch(err => console.error("Failed to load automations", err));
+        }
+    }, []);
 
     // --- 🔌 WebSocket Connection Logic ---
     useEffect(() => {
@@ -46,7 +62,6 @@ export default function ChatInterface() {
                         setStatusText(payload.data);
                     }
                 } catch (e) {
-                    // Fallback for raw base64 (backward compatibility)
                     if (event.data.startsWith('data:image') || event.data.length > 100) {
                         setLiveImage(`data:image/jpeg;base64,${event.data}`);
                     }
@@ -56,7 +71,6 @@ export default function ChatInterface() {
             ws.onclose = () => {
                 console.log('❌ Disconnected from Live Preview Stream');
                 setWsStatus('disconnected');
-                // Simple retry logic
                 setTimeout(() => {
                     if (wsRef.current?.readyState === WebSocket.CLOSED) {
                         connectWebSocket();
@@ -80,8 +94,6 @@ export default function ChatInterface() {
     }, []);
 
     const ensureSessionExists = () => {
-        // Placeholder for session validation logic
-        // In a real app, this would check cookies or ping an auth endpoint
         const userId = localStorage.getItem('browuser_uid');
         if (!userId) {
             console.warn("No session found, redirecting...");
@@ -134,7 +146,7 @@ export default function ChatInterface() {
 
             setMessages(prev => [...prev, agentMessage]);
             setStatusText('Completed');
-            setShowSaveOption(true); // Show save option after success
+            setShowSaveOption(true);
 
         } catch (error) {
             console.error('Chat Error:', error);
@@ -162,9 +174,18 @@ export default function ChatInterface() {
             });
             alert("Automation Saved!");
             setShowSaveOption(false);
+            // Refresh list
+            const res = await fetch(`http://localhost:5000/api/automation/list/${userId}`);
+            const data = await res.json();
+            if (data.automations) setSavedAutomations(data.automations);
+
         } catch (e) {
             alert("Failed to save.");
         }
+    };
+
+    const handleRunAutomation = (name) => {
+        setInput(`Run automation: ${name}`);
     };
 
     const handleLogout = () => {
@@ -174,7 +195,6 @@ export default function ChatInterface() {
 
     const manualReconnect = () => {
         if (wsRef.current) wsRef.current.close();
-        // The useEffect retry logic will pick it up, or we can force reload
         window.location.reload();
     };
 
@@ -191,10 +211,18 @@ export default function ChatInterface() {
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-4 space-y-2">
-                    <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">History</div>
-                    <div className="p-3 bg-gray-100 rounded-lg text-sm font-medium text-gray-700 cursor-pointer hover:bg-gray-200 transition-colors border border-transparent hover:border-gray-300">
-                        New Automation Session
+                    <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-2">
+                        <BookOpen size={12} /> Saved Automations
                     </div>
+                    {savedAutomations.length === 0 && (
+                        <div className="text-xs text-gray-400 italic p-2">No saved workflows yet.</div>
+                    )}
+                    {savedAutomations.map((auto, idx) => (
+                        <div key={idx} onClick={() => handleRunAutomation(auto.name)} className="p-3 bg-gray-50 rounded-lg text-sm font-medium text-gray-700 cursor-pointer hover:bg-cyan-50 hover:text-cyan-700 transition-colors border border-transparent hover:border-cyan-100 flex items-center justify-between group">
+                            <span>{auto.name}</span>
+                            <Play size={12} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+                        </div>
+                    ))}
                 </div>
 
                 <div className="p-4 border-t border-gray-100">
@@ -219,13 +247,13 @@ export default function ChatInterface() {
                     </div>
                     <div className="flex items-center space-x-4">
                         {showSaveOption && (
-                            <button onClick={handleSaveAutomation} className="flex items-center space-x-1 px-3 py-1.5 bg-cyan-50 text-cyan-700 rounded-lg text-xs font-bold hover:bg-cyan-100 transition-colors">
+                            <button onClick={handleSaveAutomation} className="flex items-center space-x-1 px-3 py-1.5 bg-cyan-50 text-cyan-700 rounded-lg text-xs font-bold hover:bg-cyan-100 transition-colors animate-pulse">
                                 <Save size={14} />
                                 <span>Save Workflow</span>
                             </button>
                         )}
                         <div className="px-3 py-1 bg-gray-100 rounded-full text-xs font-mono text-gray-500">
-                            v3.2.0-auto
+                            v3.5.0-stealth
                         </div>
                     </div>
                 </div>

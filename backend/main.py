@@ -552,13 +552,24 @@ async def save_automation(req: SaveAutomationRequest):
             "user_id": req.user_id,
             "name": req.name,
             "description": req.description,
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
+            "usage_count": 1
         }
+        # Assuming table 'saved_automations' exists
         supabase.table('saved_automations').insert(data).execute()
         return {"status": "success", "message": "Automation saved successfully"}
     except Exception as e:
         print(f"Save Error: {e}")
         raise HTTPException(status_code=500, detail="Failed to save automation")
+
+@app.get("/api/automation/list/{user_id}")
+async def list_automations(user_id: str):
+    try:
+        response = supabase.table('saved_automations').select('*').eq('user_id', user_id).execute()
+        return {"automations": response.data}
+    except Exception as e:
+        print(f"List Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch automations")
 
 if __name__ == "__main__":
     import uvicorn
