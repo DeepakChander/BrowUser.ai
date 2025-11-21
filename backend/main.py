@@ -251,6 +251,44 @@ tools = [
 
 # --- ⚡ Execution Engine with ReAct Loop & Stealth Mode ---
 
+# --- 📊 Logging & Auditing ---
+
+async def log_event(user_id: str, query_id: str, action_type: str, details: dict):
+    """
+    Logs an event to Supabase and streams it to the frontend.
+    action_type: 'LLM_THINK', 'TOOL_EXEC', 'ERROR', 'SYSTEM', 'EXECUTION_SUCCESS', 'EXECUTION_FAIL'
+    """
+    timestamp = datetime.now().isoformat()
+    
+    # 1. Stream to Frontend (Real-time)
+    log_payload = {
+        "type": "log",
+        "data": {
+            "timestamp": timestamp,
+            "action_type": action_type,
+            "details": details
+        }
+    }
+    await manager.send_payload(user_id, log_payload)
+    
+    # 2. Persist to Supabase (Async/Fire-and-forget ideally, but awaiting for safety here)
+    try:
+        audit_data = {
+            "user_id": user_id,
+            "query_id": query_id,
+            "action_type": action_type,
+            "details": details,
+            "created_at": timestamp
+        }
+        # We use a background task or just await it. For simplicity, awaiting.
+        # Note: Ensure 'agent_audit_logs' table exists.
+        supabase.table('agent_audit_logs').insert(audit_data).execute()
+    except Exception as e:
+        print(f"[Audit] Failed to save log: {e}")
+
+
+# --- ⚡ Execution Engine with ReAct Loop & Stealth Mode ---
+
 async def capture_and_stream(page, user_id: str):
     """Captures screenshot and streams to frontend via WebSocket"""
     try:
@@ -269,6 +307,9 @@ async def execute_react_loop(user_id: str, initial_query: str, access_token: str
     browser = None
     context = None
     page = None
+    
+    # Generate a unique Query ID for this session
+    query_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000,9999)}"
     
     # Conversation History
     messages = [
@@ -289,12 +330,15 @@ IMPORTANT:
     ]
 
     try:
-        print("[ReAct] Starting Loop...")
+        print(f"[ReAct] Starting Loop. QueryID: {query_id}")
+        await log_event(user_id, query_id, "SYSTEM", {"message": f"Starting task: {initial_query}"})
         
         # Use global instance
         if not playwright_instance:
-             print("[ReAct] Error: Playwright not initialized")
-             return "❌ System Error: Browser Engine not ready."
+             err_msg = "System Error: Browser Engine not ready."
+             print(f"[ReAct] Error: {err_msg}")
+             await log_event(user_id, query_id, "ERROR", {"error": err_msg})
+             return f"❌ {err_msg}"
         
         # --- 🕵️ Browser Launch Strategy ---
         user_data_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Google", "Chrome", "User Data")
@@ -312,10 +356,12 @@ IMPORTANT:
             using_real_profile = True
             print("[ReAct] ✅ Successfully attached to Real Chrome Profile!")
             await manager.send_payload(user_id, {"type": "status", "data": "✅ Using your Real Chrome Profile"})
+            await log_event(user_id, query_id, "SYSTEM", {"message": "Attached to Real Chrome Profile"})
             
         except Exception as e:
             print(f"[ReAct] ⚠️ Could not use Real Profile (Chrome likely open). Falling back to Stealth Mode. Error: {e}")
             await manager.send_payload(user_id, {"type": "status", "data": "⚠️ Main Chrome is busy. Close it to use your saved login, or log in manually here."})
+            await log_event(user_id, query_id, "SYSTEM", {"message": "Fallback to Temporary Profile (Chrome Locked)", "error": str(e)})
             
             # Fallback: Launch fresh browser
             user_agents = [
@@ -350,6 +396,8 @@ IMPORTANT:
             print(f"[ReAct] Step {loop_count}")
             
             # 1. THINK (Call LLM)
+            await log_event(user_id, query_id, "LLM_THINK", {"step": loop_count, "messages_count": len(messages)})
+            
             completion = openai.chat.completions.create(
                 model="gpt-4o",
                 messages=messages,
@@ -369,6 +417,7 @@ IMPORTANT:
                     
                     print(f"[ReAct] Action: {tool_name} args: {args}")
                     await manager.send_payload(user_id, {"type": "status", "data": f"Step {loop_count}: {tool_name}..."})
+                    await log_event(user_id, query_id, "TOOL_EXEC", {"tool": tool_name, "args": args})
 
                     observation = ""
                     
@@ -377,6 +426,7 @@ IMPORTANT:
                         if tool_name == "task_complete":
                             final_answer = args['final_answer']
                             await manager.send_payload(user_id, {"type": "status", "data": "✅ Task Completed"})
+                            await log_event(user_id, query_id, "EXECUTION_SUCCESS", {"final_answer": final_answer})
                             
                             # Cleanup
                             if context: await context.close()
@@ -457,6 +507,7 @@ IMPORTANT:
                     except Exception as e:
                         observation = f"Error executing {tool_name}: {str(e)}"
                         print(f"[ReAct] Error: {observation}")
+                        await log_event(user_id, query_id, "ERROR", {"tool": tool_name, "error": str(e)})
 
                     # 4. FEEDBACK (Add observation to history)
                     messages.append({
@@ -467,15 +518,18 @@ IMPORTANT:
                     })
             else:
                 print("[ReAct] LLM replied without tool.")
+                await log_event(user_id, query_id, "LLM_RESPONSE", {"content": response_message.content})
                 return response_message.content
 
         if context: await context.close()
         if browser: await browser.close()
         # DO NOT STOP PLAYWRIGHT HERE
+        await log_event(user_id, query_id, "EXECUTION_FAIL", {"reason": "Max steps reached"})
         return "❌ Task timed out (max steps reached)."
 
     except Exception as e:
         print(f"[ReAct] Critical Error: {e}")
+        await log_event(user_id, query_id, "ERROR", {"error": str(e), "traceback": traceback.format_exc()})
         try:
             if context: await context.close()
             if browser: await browser.close()

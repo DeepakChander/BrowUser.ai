@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Send, Terminal, Tv, LogOut, Activity, Wifi, WifiOff, Save, RefreshCw, Play, BookOpen, Sparkles, AlertTriangle } from 'lucide-react';
 
 export default function ChatInterface() {
@@ -15,8 +15,12 @@ export default function ChatInterface() {
     const [showSaveOption, setShowSaveOption] = useState(false);
     const [savedAutomations, setSavedAutomations] = useState([]);
     const [suggestions, setSuggestions] = useState([]);
+    const [logs, setLogs] = useState([]);
+    const [showLogs, setShowLogs] = useState(false);
+
     const messagesEndRef = useRef(null);
     const wsRef = useRef(null);
+    const retryCount = useRef(0);
 
     // Auto-scroll
     useEffect(() => {
@@ -50,60 +54,67 @@ export default function ChatInterface() {
     }, []);
 
     // --- 🔌 WebSocket Connection Logic ---
-    useEffect(() => {
+    const connectWebSocket = useCallback(() => {
         const userId = localStorage.getItem('browuser_uid');
         if (!userId) return;
+        if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-        const connectWebSocket = () => {
-            console.log('Attempting to connect to Live Stream...');
-            const ws = new WebSocket(`ws://localhost:5000/ws/live-preview/${userId}`);
-            wsRef.current = ws;
+        console.log('Attempting to connect to Live Stream...');
+        const ws = new WebSocket(`ws://localhost:5000/ws/live-preview/${userId}`);
 
-            ws.onopen = () => {
-                console.log('✅ Connected to Live Preview Stream');
-                setWsStatus('connected');
-            };
-
-            ws.onmessage = (event) => {
-                try {
-                    const payload = JSON.parse(event.data);
-
-                    if (payload.type === 'image') {
-                        setLiveImage(`data:image/jpeg;base64,${payload.data}`);
-                    } else if (payload.type === 'status') {
-                        setStatusText(payload.data);
-                    }
-                } catch (e) {
-                    if (event.data.startsWith('data:image') || event.data.length > 100) {
-                        setLiveImage(`data:image/jpeg;base64,${event.data}`);
-                    }
-                }
-            };
-
-            ws.onclose = () => {
-                console.log('❌ Disconnected from Live Preview Stream');
-                setWsStatus('disconnected');
-                setTimeout(() => {
-                    if (wsRef.current?.readyState === WebSocket.CLOSED) {
-                        connectWebSocket();
-                    }
-                }, 3000);
-            };
-
-            ws.onerror = (error) => {
-                console.error('WebSocket Error:', error);
-                setWsStatus('error');
-            };
+        ws.onopen = () => {
+            console.log('✅ Connected to Live Preview Stream');
+            setWsStatus('connected');
+            retryCount.current = 0;
         };
 
-        connectWebSocket();
+        ws.onmessage = (event) => {
+            try {
+                const payload = JSON.parse(event.data);
 
+                if (payload.type === 'image') {
+                    setLiveImage(`data:image/jpeg;base64,${payload.data}`);
+                } else if (payload.type === 'status') {
+                    setStatusText(payload.data);
+                } else if (payload.type === 'log') {
+                    setLogs(prev => [payload.data, ...prev].slice(0, 50)); // Keep last 50 logs
+                }
+            } catch (e) {
+                if (event.data.startsWith('data:image') || event.data.length > 100) {
+                    setLiveImage(`data:image/jpeg;base64,${event.data}`);
+                }
+            }
+        };
+
+        ws.onclose = () => {
+            console.log('❌ Disconnected from Live Preview Stream');
+            setWsStatus('disconnected');
+            wsRef.current = null;
+
+            // Retry logic
+            if (retryCount.current < 5) {
+                const timeout = Math.min(1000 * (2 ** retryCount.current), 10000);
+                retryCount.current += 1;
+                setTimeout(connectWebSocket, timeout);
+            }
+        };
+
+        ws.onerror = (error) => {
+            console.error('WebSocket Error:', error);
+            setWsStatus('error');
+        };
+
+        wsRef.current = ws;
+    }, []);
+
+    useEffect(() => {
+        connectWebSocket();
         return () => {
             if (wsRef.current) {
                 wsRef.current.close();
             }
         };
-    }, []);
+    }, [connectWebSocket]);
 
     const ensureSessionExists = () => {
         const userId = localStorage.getItem('browuser_uid');
@@ -207,7 +218,7 @@ export default function ChatInterface() {
 
     const manualReconnect = () => {
         if (wsRef.current) wsRef.current.close();
-        window.location.reload();
+        connectWebSocket();
     };
 
     return (
@@ -256,6 +267,37 @@ export default function ChatInterface() {
                     </div>
                 </div>
 
+                {/* Agent Logs Toggle */}
+                <div className="p-4 border-t border-gray-100 bg-gray-50">
+                    <button
+                        onClick={() => setShowLogs(!showLogs)}
+                        className="flex items-center justify-between w-full text-sm text-gray-500 hover:text-black transition-colors font-medium"
+                    >
+                        <span className="flex items-center gap-2"><Terminal size={14} /> Agent Logs</span>
+                        <span>{showLogs ? '▼' : '▲'}</span>
+                    </button>
+
+                    {showLogs && (
+                        <div className="mt-2 h-48 bg-black rounded-lg p-3 overflow-y-auto font-mono text-[10px] text-green-400 shadow-inner">
+                            {logs.length === 0 && <div className="text-gray-600 italic">Waiting for logs...</div>}
+                            {logs.map((log, i) => (
+                                <div key={i} className="mb-2 border-b border-gray-800 pb-1 last:border-0">
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <span className={`font-bold ${log.action_type === 'ERROR' ? 'text-red-500' :
+                                                log.action_type === 'LLM_THINK' ? 'text-blue-400' :
+                                                    log.action_type === 'TOOL_EXEC' ? 'text-yellow-400' : 'text-gray-400'
+                                            }`}>[{log.action_type}]</span>
+                                        <span className="text-gray-500">{new Date(log.timestamp).toLocaleTimeString()}</span>
+                                    </div>
+                                    <div className="text-gray-300 break-words whitespace-pre-wrap">
+                                        {JSON.stringify(log.details, null, 2)}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+
                 <div className="p-4 border-t border-gray-100">
                     <button onClick={handleLogout} className="flex items-center space-x-2 text-gray-500 hover:text-red-500 transition-colors text-sm font-medium w-full px-2 py-2 rounded-lg hover:bg-red-50">
                         <LogOut size={16} />
@@ -284,7 +326,7 @@ export default function ChatInterface() {
                             </button>
                         )}
                         <div className="px-3 py-1 bg-gray-100 rounded-full text-xs font-mono text-gray-500">
-                            v4.1.0-proactive
+                            v5.0.0-auditing
                         </div>
                     </div>
                 </div>
@@ -301,7 +343,16 @@ export default function ChatInterface() {
                                         ? 'bg-black text-white rounded-tr-none'
                                         : 'bg-white text-gray-800 border border-gray-200 rounded-tl-none'
                                         }`}>
-                                        {msg.content}
+                                        <div className="markdown-body">
+                                            {msg.content}
+                                        </div>
+                                        {msg.role === 'agent' && msg.content.includes("Task Completed") && (
+                                            <div className="mt-3 pt-3 border-t border-gray-100">
+                                                <button className="text-xs text-cyan-600 hover:text-cyan-700 font-medium flex items-center gap-1">
+                                                    <BookOpen size={12} /> View Audit Trail
+                                                </button>
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             ))}
@@ -349,7 +400,7 @@ export default function ChatInterface() {
                                     <RefreshCw size={14} />
                                 </button>
                                 <div className={`flex items-center space-x-2 text-xs font-bold uppercase ${wsStatus === 'connected' ? 'text-green-500' :
-                                        wsStatus === 'error' ? 'text-red-500' : 'text-gray-400'
+                                    wsStatus === 'error' ? 'text-red-500' : 'text-gray-400'
                                     }`}>
                                     {wsStatus === 'connected' ? <Wifi size={14} /> : <WifiOff size={14} />}
                                     <span>{wsStatus}</span>
