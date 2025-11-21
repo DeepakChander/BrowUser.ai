@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Terminal, Tv, LogOut, Activity, Wifi, WifiOff, Save, RefreshCw, Play, BookOpen } from 'lucide-react';
+import { Send, Terminal, Tv, LogOut, Activity, Wifi, WifiOff, Save, RefreshCw, Play, BookOpen, Sparkles, AlertTriangle } from 'lucide-react';
 
 export default function ChatInterface() {
     const [messages, setMessages] = useState([
@@ -14,6 +14,7 @@ export default function ChatInterface() {
     const [wsStatus, setWsStatus] = useState('disconnected');
     const [showSaveOption, setShowSaveOption] = useState(false);
     const [savedAutomations, setSavedAutomations] = useState([]);
+    const [suggestions, setSuggestions] = useState([]);
     const messagesEndRef = useRef(null);
     const wsRef = useRef(null);
 
@@ -22,10 +23,11 @@ export default function ChatInterface() {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
-    // Fetch Saved Automations
+    // Fetch Saved Automations & Suggestions
     useEffect(() => {
         const userId = localStorage.getItem('browuser_uid');
         if (userId) {
+            // Load Saved
             fetch(`http://localhost:5000/api/automation/list/${userId}`)
                 .then(res => res.json())
                 .then(data => {
@@ -34,6 +36,16 @@ export default function ChatInterface() {
                     }
                 })
                 .catch(err => console.error("Failed to load automations", err));
+
+            // Load Suggestions
+            fetch(`http://localhost:5000/api/automation/analyze/${userId}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.suggestions) {
+                        setSuggestions(data.suggestions);
+                    }
+                })
+                .catch(err => console.error("Failed to load suggestions", err));
         }
     }, []);
 
@@ -114,7 +126,7 @@ export default function ChatInterface() {
         setInput('');
         setIsLoading(true);
         setLiveImage(null);
-        setStatusText('Processing...');
+        setStatusText('Agent is decomposing task...'); // UX Polish: Initial status
         setShowSaveOption(false);
 
         try {
@@ -202,7 +214,7 @@ export default function ChatInterface() {
         <div className="flex h-screen bg-gray-50 text-black font-sans overflow-hidden">
 
             {/* Left Sidebar */}
-            <div className="w-64 bg-white border-r border-gray-200 flex flex-col hidden md:flex">
+            <div className="w-72 bg-white border-r border-gray-200 flex flex-col hidden md:flex">
                 <div className="p-6 border-b border-gray-100 flex items-center space-x-2">
                     <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center text-cyan-400">
                         <Terminal size={18} />
@@ -210,19 +222,38 @@ export default function ChatInterface() {
                     <span className="font-bold text-lg tracking-tight">BrowUser.ai</span>
                 </div>
 
-                <div className="flex-1 overflow-y-auto p-4 space-y-2">
-                    <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-2">
-                        <BookOpen size={12} /> Saved Automations
-                    </div>
-                    {savedAutomations.length === 0 && (
-                        <div className="text-xs text-gray-400 italic p-2">No saved workflows yet.</div>
-                    )}
-                    {savedAutomations.map((auto, idx) => (
-                        <div key={idx} onClick={() => handleRunAutomation(auto.name)} className="p-3 bg-gray-50 rounded-lg text-sm font-medium text-gray-700 cursor-pointer hover:bg-cyan-50 hover:text-cyan-700 transition-colors border border-transparent hover:border-cyan-100 flex items-center justify-between group">
-                            <span>{auto.name}</span>
-                            <Play size={12} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+                <div className="flex-1 overflow-y-auto p-4 space-y-6">
+
+                    {/* Suggestions Section */}
+                    {suggestions.length > 0 && (
+                        <div className="space-y-2">
+                            <div className="text-xs font-semibold text-cyan-600 uppercase tracking-wider mb-2 flex items-center gap-2">
+                                <Sparkles size={12} /> AI Suggestions
+                            </div>
+                            {suggestions.map((sug, idx) => (
+                                <div key={idx} onClick={() => setInput(`Create automation: ${sug.suggestion_title}`)} className="p-3 bg-cyan-50 rounded-lg border border-cyan-100 cursor-pointer hover:bg-cyan-100 transition-colors group">
+                                    <div className="text-sm font-bold text-cyan-900">{sug.suggestion_title}</div>
+                                    <div className="text-xs text-cyan-600 mt-1">Saves ~{sug.estimated_time_saved}</div>
+                                </div>
+                            ))}
                         </div>
-                    ))}
+                    )}
+
+                    {/* Saved Automations Section */}
+                    <div className="space-y-2">
+                        <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-2">
+                            <BookOpen size={12} /> Saved Automations
+                        </div>
+                        {savedAutomations.length === 0 && (
+                            <div className="text-xs text-gray-400 italic p-2">No saved workflows yet.</div>
+                        )}
+                        {savedAutomations.map((auto, idx) => (
+                            <div key={idx} onClick={() => handleRunAutomation(auto.name)} className="p-3 bg-gray-50 rounded-lg text-sm font-medium text-gray-700 cursor-pointer hover:bg-cyan-50 hover:text-cyan-700 transition-colors border border-transparent hover:border-cyan-100 flex items-center justify-between group">
+                                <span>{auto.name}</span>
+                                <Play size={12} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+                            </div>
+                        ))}
+                    </div>
                 </div>
 
                 <div className="p-4 border-t border-gray-100">
@@ -253,7 +284,7 @@ export default function ChatInterface() {
                             </button>
                         )}
                         <div className="px-3 py-1 bg-gray-100 rounded-full text-xs font-mono text-gray-500">
-                            v3.5.0-stealth
+                            v4.1.0-proactive
                         </div>
                     </div>
                 </div>
@@ -339,14 +370,24 @@ export default function ChatInterface() {
                                     <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-30"></div>
                                     <div className="absolute inset-0 bg-gradient-to-tr from-black via-transparent to-white/5"></div>
                                     <div className="text-center space-y-4 p-8 relative z-10">
-                                        <div className="relative mx-auto w-20 h-20">
-                                            <div className="absolute inset-0 border-4 border-cyan-500/20 rounded-full animate-ping"></div>
-                                            <div className="relative w-20 h-20 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin"></div>
-                                        </div>
-                                        <div>
-                                            <p className="text-cyan-400 text-sm font-mono font-bold tracking-wider">AWAITING SIGNAL</p>
-                                            <p className="text-gray-500 text-xs mt-1">Visual stream inactive</p>
-                                        </div>
+                                        {wsStatus === 'error' ? (
+                                            <div className="text-red-400 flex flex-col items-center">
+                                                <AlertTriangle size={48} className="mb-2" />
+                                                <p className="font-bold">CONNECTION LOST</p>
+                                                <p className="text-xs mt-1">Check server logs</p>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                <div className="relative mx-auto w-20 h-20">
+                                                    <div className="absolute inset-0 border-4 border-cyan-500/20 rounded-full animate-ping"></div>
+                                                    <div className="relative w-20 h-20 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin"></div>
+                                                </div>
+                                                <div>
+                                                    <p className="text-cyan-400 text-sm font-mono font-bold tracking-wider">AWAITING SIGNAL</p>
+                                                    <p className="text-gray-500 text-xs mt-1">Visual stream inactive</p>
+                                                </div>
+                                            </>
+                                        )}
                                     </div>
                                 </>
                             )}

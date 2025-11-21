@@ -277,9 +277,6 @@ IMPORTANT:
         playwright = await async_playwright().start()
         
         # --- 🕵️ Browser Launch Strategy ---
-        # Strategy A: Try to use the User's Real Chrome Profile (Best for Cookies/Auth)
-        # Strategy B: Fallback to a Fresh Profile (Stealth Mode)
-        
         user_data_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Google", "Chrome", "User Data")
         using_real_profile = False
 
@@ -606,6 +603,51 @@ async def list_automations(user_id: str):
     except Exception as e:
         print(f"List Error: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch automations")
+
+@app.get("/api/automation/analyze/{user_id}")
+async def analyze_automations(user_id: str):
+    try:
+        # Fetch saved automations
+        saved_response = supabase.table('saved_automations').select('*').eq('user_id', user_id).execute()
+        saved_automations = saved_response.data
+        
+        # In a real scenario, we would also fetch a 'task_history' table.
+        # For now, we will simulate history based on saved automations to generate suggestions.
+        
+        prompt = f"""
+        You are an Automation Consultant. Analyze the user's saved workflows and suggest 2 new optimizations.
+        
+        User's Saved Workflows:
+        {json.dumps(saved_automations)}
+        
+        If the list is empty, suggest general productivity workflows (e.g., "Daily News Summary", "Meeting Prep").
+        
+        Return ONLY a JSON array of objects with keys: "suggestion_title", "estimated_time_saved".
+        Example: [{{"suggestion_title": "Automate Weekly Report", "estimated_time_saved": "15 mins"}}]
+        """
+        
+        completion = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "system", "content": prompt}]
+        )
+        
+        content = completion.choices[0].message.content
+        # Clean up markdown code blocks if present
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0]
+            
+        suggestions = json.loads(content)
+        return {"suggestions": suggestions}
+
+    except Exception as e:
+        print(f"Analysis Error: {e}")
+        # Fallback suggestions
+        return {"suggestions": [
+            {"suggestion_title": "Daily News Summary", "estimated_time_saved": "10 mins"},
+            {"suggestion_title": "Competitor Research", "estimated_time_saved": "30 mins"}
+        ]}
 
 if __name__ == "__main__":
     import uvicorn
