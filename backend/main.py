@@ -700,7 +700,7 @@ def callback_google(code: str):
             }
             supabase.table('oauth_tokens').upsert(token_data, on_conflict='user_id').execute()
             
-        return RedirectResponse(f"http://localhost:3000/?status=success&uid={user_id}")
+        return RedirectResponse(f"http://localhost:3000/dashboard?status=success&uid={user_id}")
 
     except Exception as e:
         print(f"OAuth Error: {str(e)}")

@@ -8,11 +8,15 @@ module.exports = {
     theme: {
         extend: {
             colors: {
-                'deep-black': '#050505',
-                'dark-gray': '#0a0a0a',
-                'darker-gray': '#18181b',
-                'cyan-electric': '#06b6d4',
-                'cyan-glow': '#22d3ee',
+                'bg-primary': 'var(--bg-primary)',
+                'bg-secondary': 'var(--bg-secondary)',
+                'text-primary': 'var(--text-primary)',
+                'text-secondary': 'var(--text-secondary)',
+                'cyan-electric': 'var(--cyan-electric)',
+                'cyan-glow': 'var(--cyan-glow)',
+                'success': 'var(--success)',
+                'error': 'var(--error)',
+                'warning': 'var(--warning)',
             },
             fontFamily: {
                 sans: ['Inter', 'system-ui', 'sans-serif'],
